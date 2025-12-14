@@ -1,0 +1,306 @@
+:root {
+    --bg: #040711;
+    --panel: rgba(12, 16, 28, 0.82);
+    --panel-border: rgba(255, 255, 255, 0.06);
+    --text: #e8edf8;
+    --muted: #95a3c3;
+    --accent: #7ef3c5;
+    --accent-2: #f2c14e;
+    --danger: #ff7b7b;
+    --shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: radial-gradient(circle at 20% 20%, rgba(126, 243, 197, 0.05), transparent 35%),
+                radial-gradient(circle at 80% 10%, rgba(242, 193, 78, 0.05), transparent 40%),
+                radial-gradient(circle at 50% 80%, rgba(126, 243, 197, 0.04), transparent 40%),
+                var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', 'Helvetica Neue', sans-serif;
+    overflow: hidden;
+}
+
+canvas {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.05), transparent 60%), #02040a;
+}
+
+.chrome {
+    position: fixed;
+    inset: 0;
+    padding: 20px clamp(16px, 3vw, 32px);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border: 1px solid var(--panel-border);
+    background: linear-gradient(120deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+    border-radius: 14px;
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow);
+    pointer-events: auto;
+}
+
+.brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brand-mark {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: linear-gradient(160deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 0 6px rgba(126, 243, 197, 0.18), 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+.eyebrow {
+    margin: 0;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.title {
+    margin: 2px 0 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.panel-title {
+    margin: 4px 0 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.top-actions {
+    display: flex;
+    gap: 10px;
+}
+
+button, select, input, option {
+    font-family: inherit;
+}
+
+button {
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+    padding: 10px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform 0.1s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.25);
+}
+
+button:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+
+button:active {
+    transform: translateY(0);
+}
+
+button.ghost {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.panel {
+    pointer-events: auto;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: var(--shadow);
+    max-width: 1120px;
+    width: min(1120px, 100%);
+}
+
+.panel-hidden .panel {
+    display: none;
+}
+
+.panel-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.control {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.control span {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.value {
+    color: var(--accent-2);
+    font-weight: 600;
+}
+
+select, input[type="color"] {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    padding: 10px 12px;
+}
+
+input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+}
+
+.switches {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.02);
+    cursor: pointer;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: relative;
+    width: 42px;
+    height: 22px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    transition: background 0.2s ease;
+}
+
+.slider::before {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.2s ease, background 0.2s ease;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+}
+
+.switch input:checked + .slider {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.switch input:checked + .slider::before {
+    transform: translateX(20px);
+}
+
+.switch-label {
+    color: var(--text);
+    font-weight: 500;
+}
+
+.panel-footer {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 12px;
+    border: 1px solid var(--panel-border);
+}
+
+.chip input[type="color"] {
+    width: 44px;
+    height: 32px;
+    padding: 0;
+    background: transparent;
+}
+
+@media (max-width: 900px) {
+    .chrome {
+        padding: 14px;
+    }
+
+    .panel {
+        max-height: calc(100vh - 120px);
+        overflow: auto;
+    }
+}

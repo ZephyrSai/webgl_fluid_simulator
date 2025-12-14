@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid Studio | WebGL</title>
+    <meta name="description" content="A refreshed WebGL fluid simulation with a modern control panel.">
+    <link rel="icon" href="./assets/logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <canvas id="sim-canvas" aria-label="Fluid simulation canvas"></canvas>
+
+    <div class="chrome">
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"></span>
+                <div>
+                    <p class="eyebrow">WebGL lab</p>
+                    <p class="title">Fluid Studio</p>
+                </div>
+            </div>
+            <div class="top-actions">
+                <button id="toggle-panel" type="button" class="ghost">Hide controls</button>
+                <button id="burst" type="button" class="ghost">Color burst</button>
+                <button id="screenshot" type="button">Snapshot</button>
+            </div>
+        </header>
+
+        <section class="panel" data-ui="panel">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Live controls</p>
+                    <p class="panel-title">Shape the flow in real time.</p>
+                </div>
+                <p class="hint">Drag on the canvas to paint. Space = burst, P = pause.</p>
+            </div>
+
+            <div class="controls-grid">
+                <label class="control">
+                    <span>Render quality</span>
+                    <select id="quality">
+                        <option value="1024">High</option>
+                        <option value="512">Medium</option>
+                        <option value="256">Low</option>
+                        <option value="128">Very low</option>
+                    </select>
+                </label>
+                <label class="control">
+                    <span>Sim resolution</span>
+                    <select id="sim-resolution">
+                        <option value="256">256</option>
+                        <option value="128" selected>128</option>
+                        <option value="64">64</option>
+                        <option value="32">32</option>
+                    </select>
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Density diffusion</span>
+                        <span class="value" data-for="density">1.0</span>
+                    </div>
+                    <input id="density" type="range" min="0" max="4" step="0.05">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Velocity diffusion</span>
+                        <span class="value" data-for="velocity-diffusion">0.2</span>
+                    </div>
+                    <input id="velocity-diffusion" type="range" min="0" max="4" step="0.05">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Pressure</span>
+                        <span class="value" data-for="pressure">0.8</span>
+                    </div>
+                    <input id="pressure" type="range" min="0" max="1" step="0.01">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Vorticity</span>
+                        <span class="value" data-for="curl">30</span>
+                    </div>
+                    <input id="curl" type="range" min="0" max="50" step="1">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Splat radius</span>
+                        <span class="value" data-for="splat-radius">0.25</span>
+                    </div>
+                    <input id="splat-radius" type="range" min="0.01" max="1" step="0.01">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Bloom threshold</span>
+                        <span class="value" data-for="bloom-threshold">0.6</span>
+                    </div>
+                    <input id="bloom-threshold" type="range" min="0" max="1" step="0.01">
+                </label>
+                <label class="control">
+                    <div class="label-row">
+                        <span>Bloom intensity</span>
+                        <span class="value" data-for="bloom-intensity">0.8</span>
+                    </div>
+                    <input id="bloom-intensity" type="range" min="0.1" max="2" step="0.05">
+                </label>
+            </div>
+
+            <div class="switches">
+                <label class="switch">
+                    <input id="shading" type="checkbox" checked>
+                    <span class="slider"></span>
+                    <span class="switch-label">Surface shading</span>
+                </label>
+                <label class="switch">
+                    <input id="colorful" type="checkbox" checked>
+                    <span class="slider"></span>
+                    <span class="switch-label">Auto colors</span>
+                </label>
+                <label class="switch">
+                    <input id="bloom" type="checkbox" checked>
+                    <span class="slider"></span>
+                    <span class="switch-label">Bloom</span>
+                </label>
+                <label class="switch">
+                    <input id="sunrays" type="checkbox" checked>
+                    <span class="slider"></span>
+                    <span class="switch-label">Sunrays</span>
+                </label>
+                <label class="switch">
+                    <input id="transparent" type="checkbox">
+                    <span class="slider"></span>
+                    <span class="switch-label">Transparent</span>
+                </label>
+                <label class="switch">
+                    <input id="paused" type="checkbox">
+                    <span class="slider"></span>
+                    <span class="switch-label">Pause simulation</span>
+                </label>
+            </div>
+
+            <div class="panel-footer">
+                <label class="chip">
+                    <span>Background</span>
+                    <input id="background" type="color" value="#000000" aria-label="Background color">
+                </label>
+                <button id="reset" type="button" class="ghost">Reset canvas</button>
+            </div>
+        </section>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
