@@ -1,5 +1,7 @@
 # Fluid Studio (modern)
 
+https://zephyrsai.github.io/webgl_fluid_simulator/
+
 Modernized UI for the WebGL fluid simulation. Same shaders and behavior, wrapped in a streamlined control surface that works well on desktop and mobile.
 
 Built on Pavel Dobryakov's original WebGL Fluid Simulation (MIT).
