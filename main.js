@@ -22,12 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-'use strict';
+import { MusicEngine } from './audio.js';
+import { createInput } from './input.js';
 
 // Simulation section
 
 const canvas = document.getElementById('sim-canvas');
-resizeCanvas();
 
 let config = {
     SIM_RESOLUTION: 128,
@@ -55,24 +55,32 @@ let config = {
     SUNRAYS: true,
     SUNRAYS_RESOLUTION: 196,
     SUNRAYS_WEIGHT: 1.0,
+    MAX_PIXEL_RATIO: 2,
+    BEAT_PULSES: true,
 }
 
-function pointerPrototype () {
-    this.id = -1;
-    this.texcoordX = 0;
-    this.texcoordY = 0;
-    this.prevTexcoordX = 0;
-    this.prevTexcoordY = 0;
-    this.deltaX = 0;
-    this.deltaY = 0;
-    this.down = false;
-    this.moved = false;
-    this.color = [30, 0, 300];
-}
+// Splat contributions below these levels are invisible, so each splat only touches the
+// pixels where it is above them (scissor rect) instead of the whole texture.
+const VELOCITY_EPSILON = 0.5;
+const DYE_EPSILON = 0.0015;
+const MAX_SPLATS_PER_FRAME = 72;
+const MIN_QUALITY = 0.55;
+const PINCH_FORCE = 150;
+const TWIST_FORCE = 90;
+const FALLBACK_BEAT = 60 / 100;
 
-let pointers = [];
 let splatStack = [];
-pointers.push(new pointerPrototype());
+let pendingForces = [];
+let pendingDroplets = [];
+let pendingPulses = [];
+let needsRender = true;
+let needsResize = true;
+let qualityFactor = 1;
+let cssWidth = 1;
+let cssHeight = 1;
+let contextLost = false;
+
+resizeCanvas();
 
 const { gl, ext } = getWebGLContext(canvas);
 
@@ -86,10 +94,23 @@ if (!ext.supportLinearFiltering) {
     config.SUNRAYS = false;
 }
 
+const music = new MusicEngine();
+loadMusicPrefs();
+
+const input = createInput(canvas, {
+    onActivate: () => music.unlock(),
+    onDown: handlePointerDown,
+    onUp: handlePointerUp,
+    onTap: handleTap,
+    onMultiTap: () => triggerBurst(),
+    onPinch: handlePinch,
+    onTwist: handleTwist,
+});
+
 bindUI();
 
 function getWebGLContext (canvas) {
-    const params = { alpha: true, depth: false, stencil: false, antialias: false, preserveDrawingBuffer: false };
+    const params = { alpha: true, depth: false, stencil: false, antialias: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' };
 
     let gl = canvas.getContext('webgl2', params);
     const isWebGL2 = !!gl;
@@ -193,6 +214,7 @@ function bindUI () {
             config[key] = value;
             setValueLabel(id, formatter(value));
             if (options.onChange) options.onChange();
+            needsRender = true;
         });
     };
 
@@ -203,6 +225,7 @@ function bindUI () {
         el.addEventListener('change', () => {
             config[key] = parseInt(el.value);
             if (onChange) onChange();
+            needsRender = true;
         });
     };
 
@@ -213,6 +236,7 @@ function bindUI () {
         el.addEventListener('change', () => {
             config[key] = el.checked;
             if (onChange) onChange();
+            needsRender = true;
         });
     };
 
@@ -232,28 +256,27 @@ function bindUI () {
     bindToggle('sunrays', 'SUNRAYS', updateKeywords);
     bindToggle('transparent', 'TRANSPARENT');
     bindToggle('paused', 'PAUSED');
+    bindToggle('beat-pulses', 'BEAT_PULSES');
 
     const background = document.getElementById('background');
     if (background) {
         background.value = rgbToHex(config.BACK_COLOR);
         background.addEventListener('input', () => {
             config.BACK_COLOR = hexToRgb(background.value);
+            needsRender = true;
         });
     }
 
     const burst = document.getElementById('burst');
     if (burst) burst.addEventListener('click', () => {
-        splatStack.push(parseInt(Math.random() * 20) + 5);
+        music.unlock();
+        triggerBurst();
     });
 
     const togglePanel = document.getElementById('toggle-panel');
-    const panel = document.querySelector('.panel');
-    if (togglePanel && panel) {
-        togglePanel.addEventListener('click', () => {
-            const hidden = document.body.classList.toggle('panel-hidden');
-            togglePanel.textContent = hidden ? 'Show controls' : 'Hide controls';
-        });
-    }
+    if (togglePanel) togglePanel.addEventListener('click', () => {
+        setPanelHidden(!document.body.classList.contains('panel-hidden'));
+    });
 
     const screenshot = document.getElementById('screenshot');
     if (screenshot) screenshot.addEventListener('click', captureScreenshot);
@@ -262,7 +285,209 @@ function bindUI () {
     if (reset) reset.addEventListener('click', () => {
         resetSimulation();
         multipleSplats(3);
+        needsRender = true;
     });
+
+    bindMusicUI();
+    bindFullscreen();
+
+    // On touch-first devices (tablets, phones) the panel would cover the canvas; start with it tucked away.
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
+        setPanelHidden(true);
+
+    window.addEventListener('keydown', e => {
+        if (e.target && e.target.closest && e.target.closest('input, select, textarea')) return;
+        music.unlock();
+        switch (e.code) {
+            case 'KeyP':
+                config.PAUSED = !config.PAUSED;
+                syncToggle('paused', config.PAUSED);
+                break;
+            case 'KeyF':
+                toggleFullscreen();
+                break;
+            case 'KeyM':
+                setSoundEnabled(!music.enabled);
+                break;
+            case 'KeyH':
+                setPanelHidden(!document.body.classList.contains('panel-hidden'));
+                break;
+            case 'Space':
+                e.preventDefault();
+                triggerBurst();
+                break;
+        }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) music.suspend();
+        else music.resume();
+    });
+
+    canvas.addEventListener('webglcontextlost', e => {
+        e.preventDefault();
+        contextLost = true;
+    });
+    // Rebuilding every program and texture in place isn't worth it; the fluid state is ephemeral.
+    canvas.addEventListener('webglcontextrestored', () => location.reload());
+}
+
+function setPanelHidden (hidden) {
+    document.body.classList.toggle('panel-hidden', hidden);
+    const label = document.querySelector('#toggle-panel .btn-label');
+    if (label) label.textContent = hidden ? 'Show controls' : 'Hide controls';
+}
+
+function bindMusicUI () {
+    const sound = document.getElementById('sound');
+    if (sound) sound.addEventListener('click', () => setSoundEnabled(!music.enabled));
+
+    const mood = document.getElementById('mood');
+    if (mood) {
+        mood.value = music.mood;
+        mood.addEventListener('change', () => {
+            music.setMood(mood.value);
+            saveMusicPrefs();
+        });
+    }
+
+    const scale = document.getElementById('scale');
+    if (scale) {
+        scale.value = music.scaleName;
+        scale.addEventListener('change', () => {
+            music.setScale(scale.value);
+            saveMusicPrefs();
+        });
+    }
+
+    const volume = document.getElementById('volume');
+    if (volume) {
+        const label = document.querySelector('[data-for="volume"]');
+        const show = () => { if (label) label.textContent = Math.round(music.volume * 100) + '%'; };
+        volume.value = music.volume;
+        show();
+        volume.addEventListener('input', () => {
+            music.setVolume(parseFloat(volume.value));
+            show();
+        });
+        volume.addEventListener('change', saveMusicPrefs);
+    }
+
+    music.onStateChange = refreshSoundUI;
+    music.onChord = name => {
+        const el = document.getElementById('chord-name');
+        if (el) el.textContent = name;
+    };
+    music.onBeat = strength => {
+        if (config.BEAT_PULSES) queueBeatPulses(strength);
+    };
+    music.onNote = (pointerId, midi) => {
+        const pointer = input.pointers.get(pointerId);
+        if (!pointer || !config.COLORFUL) return;
+        pointer.color = noteColor(midi);
+        pointer.colorLockUntil = performance.now() + 450;
+    };
+    refreshSoundUI();
+}
+
+function setSoundEnabled (enabled) {
+    music.setEnabled(enabled);
+    if (enabled) music.unlock();
+    saveMusicPrefs();
+    refreshSoundUI();
+}
+
+function refreshSoundUI () {
+    const sound = document.getElementById('sound');
+    if (sound) {
+        sound.setAttribute('aria-pressed', String(music.enabled));
+        sound.classList.toggle('is-off', !music.enabled);
+        const label = sound.querySelector('.btn-label');
+        if (label) label.textContent = music.enabled ? 'Sound on' : 'Sound off';
+    }
+    const state = document.getElementById('music-state');
+    if (state) {
+        if (!music.enabled) state.textContent = 'Muted';
+        else if (music.running) state.textContent = 'Playing';
+        else state.textContent = 'Touch the canvas to start';
+    }
+}
+
+function loadMusicPrefs () {
+    try {
+        const saved = JSON.parse(localStorage.getItem('fluid-studio:music') || 'null');
+        if (!saved) return;
+        if (typeof saved.enabled === 'boolean') music.enabled = saved.enabled;
+        if (typeof saved.volume === 'number') music.setVolume(saved.volume);
+        if (saved.mood) music.setMood(saved.mood);
+        if (saved.scale) music.setScale(saved.scale);
+    } catch (e) { /* storage unavailable */ }
+}
+
+function saveMusicPrefs () {
+    try {
+        localStorage.setItem('fluid-studio:music', JSON.stringify({
+            enabled: music.enabled, volume: music.volume, mood: music.mood, scale: music.scaleName,
+        }));
+    } catch (e) { /* storage unavailable */ }
+}
+
+let panelHiddenBeforeFullscreen = false;
+
+function bindFullscreen () {
+    const button = document.getElementById('fullscreen');
+    if (!button) return;
+    const root = document.documentElement;
+    const supported = !!(root.requestFullscreen || root.webkitRequestFullscreen) &&
+        !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    // iPhone Safari has no element fullscreen; "Add to Home Screen" runs the app full-screen instead.
+    if (!supported) {
+        button.hidden = true;
+        return;
+    }
+    button.addEventListener('click', toggleFullscreen);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+}
+
+function isFullscreen () {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen () {
+    const root = document.documentElement;
+    try {
+        let result;
+        if (isFullscreen()) {
+            result = document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen();
+        } else if (root.requestFullscreen) {
+            result = root.requestFullscreen({ navigationUI: 'hide' });
+        } else if (root.webkitRequestFullscreen) {
+            result = root.webkitRequestFullscreen();
+        }
+        if (result && result.catch) result.catch(() => {});
+    } catch (e) { /* denied */ }
+}
+
+function onFullscreenChange () {
+    const active = isFullscreen();
+    // Safari can fire both the prefixed and unprefixed event; only react to real transitions.
+    if (active == document.body.classList.contains('is-fullscreen')) return;
+    document.body.classList.toggle('is-fullscreen', active);
+    const button = document.getElementById('fullscreen');
+    if (button) {
+        button.setAttribute('aria-pressed', String(active));
+        const label = button.querySelector('.btn-label');
+        if (label) label.textContent = active ? 'Exit fullscreen' : 'Fullscreen';
+    }
+    // Give the canvas the whole screen while immersed; restore the panel afterwards.
+    if (active) {
+        panelHiddenBeforeFullscreen = document.body.classList.contains('panel-hidden');
+        setPanelHidden(true);
+    } else {
+        setPanelHidden(panelHiddenBeforeFullscreen);
+    }
+    needsResize = true;
 }
 
 function syncToggle (id, value) {
@@ -281,11 +506,16 @@ function captureScreenshot () {
 
     let texture = framebufferToTexture(target);
     texture = normalizeTexture(texture, target.width, target.height);
+    destroyFBO(target);
+    needsRender = true;
 
     let captureCanvas = textureToCanvas(texture, target.width, target.height);
-    let datauri = captureCanvas.toDataURL();
-    downloadURI('fluid.png', datauri);
-    URL.revokeObjectURL(datauri);
+    captureCanvas.toBlob(blob => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        downloadURI('fluid.png', url);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
 }
 
 function framebufferToTexture (target) {
@@ -508,16 +738,6 @@ const clearShader = compileShader(gl.FRAGMENT_SHADER, `
     }
 `);
 
-const colorShader = compileShader(gl.FRAGMENT_SHADER, `
-    precision mediump float;
-
-    uniform vec4 color;
-
-    void main () {
-        gl_FragColor = color;
-    }
-`);
-
 const checkerboardShader = compileShader(gl.FRAGMENT_SHADER, `
     precision highp float;
     precision highp sampler2D;
@@ -671,10 +891,9 @@ const sunraysMaskShader = compileShader(gl.FRAGMENT_SHADER, `
     uniform sampler2D uTexture;
 
     void main () {
-        vec4 c = texture2D(uTexture, vUv);
+        vec3 c = texture2D(uTexture, vUv).rgb;
         float br = max(c.r, max(c.g, c.b));
-        c.a = 1.0 - min(max(br * 20.0, 0.0), 0.8);
-        gl_FragColor = c;
+        gl_FragColor = vec4(1.0 - min(max(br * 20.0, 0.0), 0.8));
     }
 `);
 
@@ -699,12 +918,12 @@ const sunraysShader = compileShader(gl.FRAGMENT_SHADER, `
         dir *= 1.0 / float(ITERATIONS) * Density;
         float illuminationDecay = 1.0;
 
-        float color = texture2D(uTexture, vUv).a;
+        float color = texture2D(uTexture, vUv).r;
 
         for (int i = 0; i < ITERATIONS; i++)
         {
             coord -= dir;
-            float col = texture2D(uTexture, coord).a;
+            float col = texture2D(uTexture, coord).r;
             color += col * illuminationDecay * weight;
             illuminationDecay *= Decay;
         }
@@ -713,12 +932,12 @@ const sunraysShader = compileShader(gl.FRAGMENT_SHADER, `
     }
 `);
 
+// Splats are drawn with additive blending straight into the current buffer, clipped to the
+// splat's footprint, so they don't need a full-screen read + ping-pong pass each.
 const splatShader = compileShader(gl.FRAGMENT_SHADER, `
     precision highp float;
-    precision highp sampler2D;
 
     varying vec2 vUv;
-    uniform sampler2D uTarget;
     uniform float aspectRatio;
     uniform vec3 color;
     uniform vec2 point;
@@ -728,8 +947,27 @@ const splatShader = compileShader(gl.FRAGMENT_SHADER, `
         vec2 p = vUv - point.xy;
         p.x *= aspectRatio;
         vec3 splat = exp(-dot(p, p) / radius) * color;
-        vec3 base = texture2D(uTarget, vUv).xyz;
-        gl_FragColor = vec4(base + splat, 1.0);
+        gl_FragColor = vec4(splat, 0.0);
+    }
+`);
+
+// Radial (explode / implode) and tangential (vortex) velocity around a point, for gestures and beat pulses.
+const forceShader = compileShader(gl.FRAGMENT_SHADER, `
+    precision highp float;
+
+    varying vec2 vUv;
+    uniform float aspectRatio;
+    uniform vec2 point;
+    uniform float radius;
+    uniform vec2 strength;
+
+    void main () {
+        vec2 p = vUv - point.xy;
+        p.x *= aspectRatio;
+        vec2 q = p / sqrt(radius);
+        float falloff = exp(-dot(q, q)) * 2.3316;
+        vec2 force = (strength.x * q + strength.y * vec2(-q.y, q.x)) * falloff;
+        gl_FragColor = vec4(force, 0.0, 0.0);
     }
 `);
 
@@ -946,13 +1184,13 @@ let bloom;
 let bloomFramebuffers = [];
 let sunrays;
 let sunraysTemp;
+let sunraysMask;
 
 let ditheringTexture = createTextureAsync('./assets/LDR_LLL1_0.png');
 
 const blurProgram            = new Program(blurVertexShader, blurShader);
 const copyProgram            = new Program(baseVertexShader, copyShader);
 const clearProgram           = new Program(baseVertexShader, clearShader);
-const colorProgram           = new Program(baseVertexShader, colorShader);
 const checkerboardProgram    = new Program(baseVertexShader, checkerboardShader);
 const bloomPrefilterProgram  = new Program(baseVertexShader, bloomPrefilterShader);
 const bloomBlurProgram       = new Program(baseVertexShader, bloomBlurShader);
@@ -960,6 +1198,7 @@ const bloomFinalProgram      = new Program(baseVertexShader, bloomFinalShader);
 const sunraysMaskProgram     = new Program(baseVertexShader, sunraysMaskShader);
 const sunraysProgram         = new Program(baseVertexShader, sunraysShader);
 const splatProgram           = new Program(baseVertexShader, splatShader);
+const forceProgram           = new Program(baseVertexShader, forceShader);
 const advectionProgram       = new Program(baseVertexShader, advectionShader);
 const divergenceProgram      = new Program(baseVertexShader, divergenceShader);
 const curlProgram            = new Program(baseVertexShader, curlShader);
@@ -991,9 +1230,10 @@ function initFramebuffers () {
     else
         velocity = resizeDoubleFBO(velocity, simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering);
 
-    divergence = createFBO      (simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
-    curl       = createFBO      (simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
-    pressure   = createDoubleFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
+    // Only reallocate what actually changed size, and free the old textures (they used to leak on every resize).
+    divergence = ensureFBO      (divergence, simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
+    curl       = ensureFBO      (curl,       simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
+    pressure   = ensureDoubleFBO(pressure,   simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST);
 
     initBloomFramebuffers();
     initSunraysFramebuffers();
@@ -1001,13 +1241,16 @@ function initFramebuffers () {
 
 function initBloomFramebuffers () {
     let res = getResolution(config.BLOOM_RESOLUTION);
+    if (bloom && bloom.width == res.width && bloom.height == res.height) return;
 
     const texType = ext.halfFloatTexType;
     const rgba = ext.formatRGBA;
     const filtering = ext.supportLinearFiltering ? gl.LINEAR : gl.NEAREST;
 
+    destroyFBO(bloom);
     bloom = createFBO(res.width, res.height, rgba.internalFormat, rgba.format, texType, filtering);
 
+    bloomFramebuffers.forEach(destroyFBO);
     bloomFramebuffers.length = 0;
     for (let i = 0; i < config.BLOOM_ITERATIONS; i++)
     {
@@ -1023,13 +1266,37 @@ function initBloomFramebuffers () {
 
 function initSunraysFramebuffers () {
     let res = getResolution(config.SUNRAYS_RESOLUTION);
+    // The mask used to be rendered at full dye resolution; 2x the rays resolution looks the same once blurred.
+    let maskRes = getResolution(config.SUNRAYS_RESOLUTION * 2);
 
     const texType = ext.halfFloatTexType;
     const r = ext.formatR;
     const filtering = ext.supportLinearFiltering ? gl.LINEAR : gl.NEAREST;
 
-    sunrays     = createFBO(res.width, res.height, r.internalFormat, r.format, texType, filtering);
-    sunraysTemp = createFBO(res.width, res.height, r.internalFormat, r.format, texType, filtering);
+    sunrays     = ensureFBO(sunrays,     res.width,     res.height,     r.internalFormat, r.format, texType, filtering);
+    sunraysTemp = ensureFBO(sunraysTemp, res.width,     res.height,     r.internalFormat, r.format, texType, filtering);
+    sunraysMask = ensureFBO(sunraysMask, maskRes.width, maskRes.height, r.internalFormat, r.format, texType, filtering);
+}
+
+function ensureFBO (target, w, h, internalFormat, format, type, param) {
+    if (target && target.width == w && target.height == h) return target;
+    destroyFBO(target);
+    return createFBO(w, h, internalFormat, format, type, param);
+}
+
+function ensureDoubleFBO (target, w, h, internalFormat, format, type, param) {
+    if (target && target.width == w && target.height == h) return target;
+    if (target) {
+        destroyFBO(target.read);
+        destroyFBO(target.write);
+    }
+    return createDoubleFBO(w, h, internalFormat, format, type, param);
+}
+
+function destroyFBO (target) {
+    if (!target) return;
+    gl.deleteFramebuffer(target.fbo);
+    gl.deleteTexture(target.texture);
 }
 
 function createFBO (w, h, internalFormat, format, type, param) {
@@ -1046,6 +1313,7 @@ function createFBO (w, h, internalFormat, format, type, param) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     gl.viewport(0, 0, w, h);
+    gl.clearColor(0.0, 0.0, 0.0, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     let texelSizeX = 1.0 / w;
@@ -1106,8 +1374,12 @@ function resizeFBO (target, w, h, internalFormat, format, type, param) {
 function resizeDoubleFBO (target, w, h, internalFormat, format, type, param) {
     if (target.width == w && target.height == h)
         return target;
-    target.read = resizeFBO(target.read, w, h, internalFormat, format, type, param);
+    const oldRead = target.read;
+    const oldWrite = target.write;
+    target.read = resizeFBO(oldRead, w, h, internalFormat, format, type, param);
     target.write = createFBO(w, h, internalFormat, format, type, param);
+    destroyFBO(oldRead);
+    destroyFBO(oldWrite);
     target.width = w;
     target.height = h;
     target.texelSizeX = 1.0 / w;
@@ -1159,33 +1431,89 @@ updateKeywords();
 initFramebuffers();
 multipleSplats(parseInt(Math.random() * 20) + 5);
 
-let lastUpdateTime = Date.now();
+let lastFrameTime = performance.now();
 let colorUpdateTimer = 0.0;
-update();
+let fallbackBeatTimer = 0.0;
+let beatSwirl = 1;
+let hudUpdateTime = 0;
 
-function update () {
-    const dt = calcDeltaTime();
-    if (resizeCanvas())
-        initFramebuffers();
-    updateColors(dt);
-    applyInputs();
-    if (!config.PAUSED)
+// Resize on events instead of reading layout (clientWidth) every frame.
+if (window.ResizeObserver) new ResizeObserver(() => { needsResize = true; }).observe(canvas);
+window.addEventListener('resize', () => { needsResize = true; });
+window.addEventListener('orientationchange', () => { needsResize = true; });
+
+requestAnimationFrame(update);
+
+function update (now) {
+    if (contextLost) return;
+    const interval = now - lastFrameTime;
+    const dt = Math.min(Math.max(interval, 0) / 1000, 0.016666);
+    lastFrameTime = now;
+    trackFrameTime(interval, now);
+
+    if (needsResize) {
+        needsResize = false;
+        if (resizeCanvas()) {
+            initFramebuffers();
+            needsRender = true;
+        }
+    }
+    updateColors(dt, now);
+    updateFallbackBeat(dt);
+    if (applyInputs(now))
+        needsRender = true;
+    if (!config.PAUSED) {
         step(dt);
-    render(null);
+        needsRender = true;
+    }
+    // While paused and untouched nothing changes, so skip the bloom/sunrays/display passes entirely.
+    if (needsRender) {
+        render(null);
+        needsRender = false;
+    }
+    updateHud(now);
     requestAnimationFrame(update);
 }
 
-function calcDeltaTime () {
-    let now = Date.now();
-    let dt = (now - lastUpdateTime) / 1000;
-    dt = Math.min(dt, 0.016666);
-    lastUpdateTime = now;
-    return dt;
+// Adaptive resolution: if frames stay slow, render the canvas at fewer pixels per CSS pixel.
+// The full-screen display pass dominates on high-DPI tablets, so this is where the budget goes.
+// If a downscale doesn't speed things up (e.g. iOS Low Power Mode caps rAF at 30fps), it is undone.
+const frameStats = { count: 0, sum: 0, settleUntil: 2500, state: 'measuring', previousAvg: 0, previousQuality: 1 };
+
+function trackFrameTime (interval, now) {
+    if (interval <= 0 || interval > 200 || now < frameStats.settleUntil || document.hidden) return;
+    frameStats.count++;
+    frameStats.sum += interval;
+    if (frameStats.count < 90) return;
+
+    const avg = frameStats.sum / frameStats.count;
+    frameStats.count = 0;
+    frameStats.sum = 0;
+
+    if (frameStats.state == 'verifying') {
+        if (avg > frameStats.previousAvg * 0.9) {
+            qualityFactor = frameStats.previousQuality;
+            frameStats.state = 'locked';
+            needsResize = true;
+            return;
+        }
+        frameStats.state = 'measuring';
+    }
+    if (frameStats.state == 'measuring' && avg > 1000 / 50 && qualityFactor > MIN_QUALITY) {
+        frameStats.previousAvg = avg;
+        frameStats.previousQuality = qualityFactor;
+        qualityFactor = Math.max(MIN_QUALITY, qualityFactor * 0.8);
+        frameStats.state = 'verifying';
+        frameStats.settleUntil = now + 1000;
+        needsResize = true;
+    }
 }
 
 function resizeCanvas () {
-    let width = scaleByPixelRatio(canvas.clientWidth);
-    let height = scaleByPixelRatio(canvas.clientHeight);
+    cssWidth = Math.max(1, canvas.clientWidth);
+    cssHeight = Math.max(1, canvas.clientHeight);
+    let width = scaleByPixelRatio(cssWidth);
+    let height = scaleByPixelRatio(cssHeight);
     if (canvas.width != width || canvas.height != height) {
         canvas.width = width;
         canvas.height = height;
@@ -1194,28 +1522,145 @@ function resizeCanvas () {
     return false;
 }
 
-function updateColors (dt) {
+function updateColors (dt, now) {
     if (!config.COLORFUL) return;
 
     colorUpdateTimer += dt * config.COLOR_UPDATE_SPEED;
     if (colorUpdateTimer >= 1) {
         colorUpdateTimer = wrap(colorUpdateTimer, 0, 1);
-        pointers.forEach(p => {
-            p.color = generateColor();
-        });
+        for (const p of input.pointers.values()) {
+            // Pointers that just played a note keep that note's color.
+            if (now >= p.colorLockUntil) p.color = generateColor();
+        }
     }
 }
 
-function applyInputs () {
-    if (splatStack.length > 0)
-        multipleSplats(splatStack.pop());
+// Held pointers pulse on the beat; without sound, keep a steady pulse so the gesture still works.
+function updateFallbackBeat (dt) {
+    if (music.running) {
+        fallbackBeatTimer = 0;
+        return;
+    }
+    fallbackBeatTimer += dt;
+    if (fallbackBeatTimer >= FALLBACK_BEAT) {
+        fallbackBeatTimer -= FALLBACK_BEAT;
+        if (config.BEAT_PULSES) queueBeatPulses(0.45);
+    }
+}
 
-    pointers.forEach(p => {
-        if (p.moved) {
-            p.moved = false;
-            splatPointer(p);
+function queueBeatPulses (strength) {
+    for (const p of input.pointers.values())
+        if (p.down && p.holding) pendingPulses.push({ id: p.id, strength });
+}
+
+function updateHud (now) {
+    if (now - hudUpdateTime < 100) return;
+    hudUpdateTime = now;
+    const level = music.running ? music.level : 0;
+    const bar = document.getElementById('energy-bar');
+    if (bar) bar.style.transform = `scaleX(${level.toFixed(3)})`;
+    const meter = document.getElementById('energy-meter');
+    if (meter) meter.style.transform = `scaleX(${level.toFixed(3)})`;
+    const value = document.getElementById('energy-value');
+    if (value) value.textContent = Math.round(level * 100) + '%';
+}
+
+function applyInputs (now) {
+    let changed = false;
+    if (splatStack.length > 0) {
+        multipleSplats(splatStack.pop());
+        changed = true;
+    }
+
+    // Runs gesture detection, which may queue forces below.
+    input.update(now);
+
+    let moving = 0;
+    for (const p of input.pointers.values()) {
+        if (!p.down) continue;
+        music.updatePointer(p);
+        if (p.pathLength > 0) moving++;
+    }
+    if (moving > 0) {
+        // Share a fixed splat budget between fingers so ten fast fingers can't stall a frame.
+        const budget = Math.max(2, Math.floor(MAX_SPLATS_PER_FRAME / moving));
+        beginSplats();
+        for (const p of input.pointers.values())
+            if (p.down && p.pathLength > 0) strokePointer(p, budget);
+        endSplats();
+        changed = true;
+    }
+
+    if (pendingDroplets.length > 0 || pendingPulses.length > 0) {
+        beginSplats();
+        for (const d of pendingDroplets)
+            splatAt(d.x, d.y, 0, 0, d.color, d.radius);
+        for (const pulse of pendingPulses) {
+            const p = input.pointers.get(pulse.id);
+            if (!p || !p.down) continue;
+            const s = strokeScales(p);
+            const color = scaleColor(p.color || generateColor(), 2.0 * pulse.strength * s.dye);
+            splatAt(p.x, p.y, 0, 0, color, baseRadius() * s.size * 0.8);
+            // A radial push alone is mostly cancelled by the pressure solve; the swirl keeps each beat visibly stirring.
+            beatSwirl = -beatSwirl;
+            pendingForces.push({ x: p.x, y: p.y, radius: baseRadius() * s.size * 3, radial: (160 + 420 * pulse.strength) * s.force, swirl: beatSwirl * (60 + 160 * pulse.strength) * s.force });
         }
-    });
+        endSplats();
+        pendingDroplets.length = 0;
+        pendingPulses.length = 0;
+        changed = true;
+    }
+
+    if (pendingForces.length > 0) {
+        beginForces();
+        for (const f of pendingForces) forceAt(f.x, f.y, f.radius, f.radial, f.swirl);
+        endSplats();
+        pendingForces.length = 0;
+        changed = true;
+    }
+    return changed;
+}
+
+// ---------------------------------------------------------------- input handlers
+
+function handlePointerDown (pointer) {
+    pointer.color = generateColor();
+    music.pointerDown(pointer);
+    needsRender = true;
+}
+
+function handlePointerUp (pointer) {
+    // Draw whatever moved since the last frame so quick flicks keep their final motion.
+    if (pointer.pathLength > 0) {
+        beginSplats();
+        strokePointer(pointer, MAX_SPLATS_PER_FRAME);
+        endSplats();
+        needsRender = true;
+    }
+    music.pointerUp(pointer);
+}
+
+function handleTap (pointer) {
+    const midi = music.tap(pointer);
+    const s = strokeScales(pointer);
+    const base = midi != null && config.COLORFUL ? noteColor(midi) : (pointer.color || generateColor());
+    pendingDroplets.push({ x: pointer.x, y: pointer.y, color: scaleColor(base, 2.2 * s.dye, {}), radius: baseRadius() * s.size * 1.2 });
+    pendingForces.push({ x: pointer.x, y: pointer.y, radius: baseRadius() * s.size * 4, radial: 380 * s.force, swirl: (Math.random() < 0.5 ? -1 : 1) * 140 * s.force });
+}
+
+function handlePinch (amount, x, y, radius) {
+    pendingForces.push({ x, y, radius: Math.max(0.002, radius * radius * 1.4), radial: amount * PINCH_FORCE, swirl: 0 });
+    music.pinch(amount);
+}
+
+function handleTwist (angle, x, y, radius) {
+    pendingForces.push({ x, y, radius: Math.max(0.002, radius * radius * 1.4), radial: 0, swirl: angle * TWIST_FORCE });
+    music.twist(angle, x);
+}
+
+function triggerBurst () {
+    splatStack.push(parseInt(Math.random() * 20) + 5);
+    music.burst();
 }
 
 function step (dt) {
@@ -1287,7 +1732,7 @@ function render (target) {
     if (config.BLOOM)
         applyBloom(dye.read, bloom);
     if (config.SUNRAYS) {
-        applySunrays(dye.read, dye.write, sunrays);
+        applySunrays(dye.read, sunraysMask, sunrays);
         blur(sunrays, sunraysTemp, 1);
     }
 
@@ -1299,8 +1744,9 @@ function render (target) {
         gl.disable(gl.BLEND);
     }
 
+    // A clear is much cheaper than drawing a full-screen quad for the background.
     if (!config.TRANSPARENT)
-        drawColor(target, normalizeColor(config.BACK_COLOR));
+        clearTarget(target, normalizeColor(config.BACK_COLOR));
     if (target == null && config.TRANSPARENT)
         drawCheckerboard(target);
     drawDisplay(target);
@@ -1308,20 +1754,27 @@ function render (target) {
 
 function resetSimulation () {
     if (!dye || !velocity) return;
-    drawColor(dye.read, { r: 0, g: 0, b: 0 });
-    drawColor(dye.write, { r: 0, g: 0, b: 0 });
-    drawColor(velocity.read, { r: 0, g: 0, b: 0 });
-    drawColor(velocity.write, { r: 0, g: 0, b: 0 });
+    const black = { r: 0, g: 0, b: 0 };
+    clearTarget(dye.read, black);
+    clearTarget(dye.write, black);
+    clearTarget(velocity.read, black);
+    clearTarget(velocity.write, black);
     if (pressure) {
-        drawColor(pressure.read, { r: 0, g: 0, b: 0 });
-        drawColor(pressure.write, { r: 0, g: 0, b: 0 });
+        clearTarget(pressure.read, black);
+        clearTarget(pressure.write, black);
     }
 }
 
-function drawColor (target, color) {
-    colorProgram.bind();
-    gl.uniform4f(colorProgram.uniforms.color, color.r, color.g, color.b, 1);
-    blit(target);
+function clearTarget (target, color) {
+    if (target == null) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    } else {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+        gl.viewport(0, 0, target.width, target.height);
+    }
+    gl.clearColor(color.r, color.g, color.b, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
 }
 
 function drawCheckerboard (target) {
@@ -1382,7 +1835,6 @@ function applyBloom (source, destination) {
         let baseTex = bloomFramebuffers[i];
         gl.uniform2f(bloomBlurProgram.uniforms.texelSize, last.texelSizeX, last.texelSizeY);
         gl.uniform1i(bloomBlurProgram.uniforms.uTexture, last.attach(0));
-        gl.viewport(0, 0, baseTex.width, baseTex.height);
         blit(baseTex);
         last = baseTex;
     }
@@ -1420,13 +1872,9 @@ function blur (target, temp, iterations) {
     }
 }
 
-function splatPointer (pointer) {
-    let dx = pointer.deltaX * config.SPLAT_FORCE;
-    let dy = pointer.deltaY * config.SPLAT_FORCE;
-    splat(pointer.texcoordX, pointer.texcoordY, dx, dy, pointer.color);
-}
-
 function multipleSplats (amount) {
+    const radius = baseRadius();
+    beginSplats();
     for (let i = 0; i < amount; i++) {
         const color = generateColor();
         color.r *= 10.0;
@@ -1436,24 +1884,167 @@ function multipleSplats (amount) {
         const y = Math.random();
         const dx = 1000 * (Math.random() - 0.5);
         const dy = 1000 * (Math.random() - 0.5);
-        splat(x, y, dx, dy, color);
+        splatAt(x, y, dx, dy, color, radius);
+    }
+    endSplats();
+}
+
+function beginSplats () {
+    splatProgram.bind();
+    gl.uniform1f(splatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.enable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+}
+
+function beginForces () {
+    forceProgram.bind();
+    gl.uniform1f(forceProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.enable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+}
+
+function endSplats () {
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+}
+
+// Adds a gaussian of velocity (dx, dy) and dye `color` at (x, y). Call between beginSplats/endSplats.
+function splatAt (x, y, dx, dy, color, radius) {
+    gl.uniform2f(splatProgram.uniforms.point, x, y);
+    gl.uniform1f(splatProgram.uniforms.radius, radius);
+    if (scissorSplat(velocity.read, x, y, radius, Math.max(Math.abs(dx), Math.abs(dy)), VELOCITY_EPSILON, 0)) {
+        gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0);
+        blit(velocity.read);
+    }
+    if (scissorSplat(dye.read, x, y, radius, Math.max(color.r, color.g, color.b), DYE_EPSILON, 0)) {
+        gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b);
+        blit(dye.read);
     }
 }
 
-function splat (x, y, dx, dy, color) {
-    splatProgram.bind();
-    gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0));
-    gl.uniform1f(splatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
-    gl.uniform2f(splatProgram.uniforms.point, x, y);
-    gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0);
-    gl.uniform1f(splatProgram.uniforms.radius, correctRadius(config.SPLAT_RADIUS / 100.0));
-    blit(velocity.write);
-    velocity.swap();
+// Radial (outward > 0) and swirl (counter-clockwise > 0) velocity. Call between beginForces/endSplats.
+function forceAt (x, y, radius, radial, swirl) {
+    if (!scissorSplat(velocity.read, x, y, radius, Math.hypot(radial, swirl), VELOCITY_EPSILON, 1.5)) return;
+    gl.uniform2f(forceProgram.uniforms.point, x, y);
+    gl.uniform1f(forceProgram.uniforms.radius, radius);
+    gl.uniform2f(forceProgram.uniforms.strength, radial, swirl);
+    blit(velocity.read);
+}
 
-    gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0));
-    gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b);
-    blit(dye.write);
-    dye.swap();
+// Limits drawing to where exp(-d²/radius) * magnitude is still above epsilon.
+function scissorSplat (target, x, y, radius, magnitude, epsilon, margin) {
+    if (!(magnitude > epsilon)) return false;
+    const extentY = Math.sqrt(radius * (Math.log(magnitude / epsilon) + margin));
+    const extentX = extentY * canvas.height / canvas.width;
+    const x0 = Math.max(0, Math.floor((x - extentX) * target.width));
+    const x1 = Math.min(target.width, Math.ceil((x + extentX) * target.width));
+    const y0 = Math.max(0, Math.floor((y - extentY) * target.height));
+    const y1 = Math.min(target.height, Math.ceil((y + extentY) * target.height));
+    if (x1 <= x0 || y1 <= y0) return false;
+    gl.scissor(x0, y0, x1 - x0, y1 - y0);
+    return true;
+}
+
+// Draws everything a pointer moved through since the last frame as evenly spaced splats, so fast
+// strokes stay continuous instead of turning into dotted beads.
+function strokePointer (pointer, budget) {
+    const aspect = canvas.width / canvas.height;
+    // Distances are measured in screen heights; this converts them to the units the
+    // original per-frame delta used, so a slow stroke produces exactly the old splat.
+    const toDelta = aspect > 1 ? 1 / aspect : 1;
+    const s = strokeScales(pointer);
+    const radius = baseRadius() * s.size;
+    const spacing = Math.max(Math.sqrt(radius * 0.5) * 0.9, 0.002);
+    const path = pointer.path;
+    const samples = pointer.pathLength;
+
+    let length = 0;
+    let px = pointer.lastX;
+    let py = pointer.lastY;
+    for (let i = 0; i < samples; i++) {
+        const x = path[i * 2];
+        const y = path[i * 2 + 1];
+        length += Math.hypot((x - px) * aspect, y - py);
+        px = x;
+        py = y;
+    }
+    pointer.pathLength = 0;
+    if (length < 1e-6) {
+        pointer.lastX = px;
+        pointer.lastY = py;
+        return;
+    }
+
+    const count = Math.min(budget, Math.max(1, Math.ceil(length / spacing)));
+    const stepLength = length / count;
+    const norm = 1 / Math.sqrt(count);
+    const strength = length * toDelta * config.SPLAT_FORCE * s.force * norm;
+    const color = scaleColor(pointer.color, s.dye * norm);
+
+    let emitted = 0;
+    let next = stepLength;
+    let travelled = 0;
+    px = pointer.lastX;
+    py = pointer.lastY;
+    for (let i = 0; i < samples && emitted < count; i++) {
+        const x = path[i * 2];
+        const y = path[i * 2 + 1];
+        const segX = (x - px) * aspect;
+        const segY = y - py;
+        const segLength = Math.hypot(segX, segY);
+        if (segLength > 0) {
+            const dirX = segX / segLength;
+            const dirY = segY / segLength;
+            while (emitted < count && next <= travelled + segLength + 1e-9) {
+                const t = (next - travelled) / segLength;
+                splatAt(px + (x - px) * t, py + (y - py) * t, dirX * strength, dirY * strength, color, radius);
+                emitted++;
+                next += stepLength;
+            }
+            travelled += segLength;
+        }
+        px = x;
+        py = y;
+    }
+    pointer.lastX = px;
+    pointer.lastY = py;
+}
+
+// Pen pressure and tilt shape the stroke; mouse and plain touch stay at the neutral 0.5.
+const strokeScaleCache = { size: 1, dye: 1, force: 1 };
+
+function strokeScales (pointer) {
+    const pressure = pointer.pressure;
+    const tilt = pointer.type == 'pen' ? pointer.tilt : 0;
+    strokeScaleCache.size = (0.35 + 1.3 * pressure) * (1 + 1.5 * tilt);
+    strokeScaleCache.dye = (0.45 + 1.1 * pressure) * (1 - 0.3 * tilt);
+    strokeScaleCache.force = 0.7 + 0.6 * pressure;
+    return strokeScaleCache;
+}
+
+function baseRadius () {
+    return correctRadius(config.SPLAT_RADIUS / 100.0);
+}
+
+const tempColor = { r: 0, g: 0, b: 0 };
+
+function scaleColor (color, amount, out = tempColor) {
+    out.r = color.r * amount;
+    out.g = color.g * amount;
+    out.b = color.b * amount;
+    return out;
+}
+
+// Pitch class → hue around the circle of fifths, so consonant notes get neighbouring colors.
+function noteColor (midi) {
+    const hue = ((((midi % 12) * 7) % 12) / 12 + (Math.random() - 0.5) * 0.04 + 1) % 1;
+    const c = HSVtoRGB(hue, 0.9, 1.0);
+    c.r *= 0.15;
+    c.g *= 0.15;
+    c.b *= 0.15;
+    return c;
 }
 
 function correctRadius (radius) {
@@ -1461,110 +2052,6 @@ function correctRadius (radius) {
     if (aspectRatio > 1)
         radius *= aspectRatio;
     return radius;
-}
-
-canvas.addEventListener('mousedown', e => {
-    let posX = scaleByPixelRatio(e.offsetX);
-    let posY = scaleByPixelRatio(e.offsetY);
-    let pointer = pointers.find(p => p.id == -1);
-    if (pointer == null)
-        pointer = new pointerPrototype();
-    updatePointerDownData(pointer, -1, posX, posY);
-});
-
-canvas.addEventListener('mousemove', e => {
-    let pointer = pointers[0];
-    if (!pointer.down) return;
-    let posX = scaleByPixelRatio(e.offsetX);
-    let posY = scaleByPixelRatio(e.offsetY);
-    updatePointerMoveData(pointer, posX, posY);
-});
-
-window.addEventListener('mouseup', () => {
-    updatePointerUpData(pointers[0]);
-});
-
-canvas.addEventListener('touchstart', e => {
-    e.preventDefault();
-    const touches = e.targetTouches;
-    while (touches.length >= pointers.length)
-        pointers.push(new pointerPrototype());
-    for (let i = 0; i < touches.length; i++) {
-        let posX = scaleByPixelRatio(touches[i].pageX);
-        let posY = scaleByPixelRatio(touches[i].pageY);
-        updatePointerDownData(pointers[i + 1], touches[i].identifier, posX, posY);
-    }
-});
-
-canvas.addEventListener('touchmove', e => {
-    e.preventDefault();
-    const touches = e.targetTouches;
-    for (let i = 0; i < touches.length; i++) {
-        let pointer = pointers[i + 1];
-        if (!pointer.down) continue;
-        let posX = scaleByPixelRatio(touches[i].pageX);
-        let posY = scaleByPixelRatio(touches[i].pageY);
-        updatePointerMoveData(pointer, posX, posY);
-    }
-}, false);
-
-window.addEventListener('touchend', e => {
-    const touches = e.changedTouches;
-    for (let i = 0; i < touches.length; i++)
-    {
-        let pointer = pointers.find(p => p.id == touches[i].identifier);
-        if (pointer == null) continue;
-        updatePointerUpData(pointer);
-    }
-});
-
-window.addEventListener('keydown', e => {
-    if (e.code === 'KeyP') {
-        config.PAUSED = !config.PAUSED;
-        syncToggle('paused', config.PAUSED);
-    }
-    if (e.key === ' ') {
-        splatStack.push(parseInt(Math.random() * 20) + 5);
-    }
-});
-
-function updatePointerDownData (pointer, id, posX, posY) {
-    pointer.id = id;
-    pointer.down = true;
-    pointer.moved = false;
-    pointer.texcoordX = posX / canvas.width;
-    pointer.texcoordY = 1.0 - posY / canvas.height;
-    pointer.prevTexcoordX = pointer.texcoordX;
-    pointer.prevTexcoordY = pointer.texcoordY;
-    pointer.deltaX = 0;
-    pointer.deltaY = 0;
-    pointer.color = generateColor();
-}
-
-function updatePointerMoveData (pointer, posX, posY) {
-    pointer.prevTexcoordX = pointer.texcoordX;
-    pointer.prevTexcoordY = pointer.texcoordY;
-    pointer.texcoordX = posX / canvas.width;
-    pointer.texcoordY = 1.0 - posY / canvas.height;
-    pointer.deltaX = correctDeltaX(pointer.texcoordX - pointer.prevTexcoordX);
-    pointer.deltaY = correctDeltaY(pointer.texcoordY - pointer.prevTexcoordY);
-    pointer.moved = Math.abs(pointer.deltaX) > 0 || Math.abs(pointer.deltaY) > 0;
-}
-
-function updatePointerUpData (pointer) {
-    pointer.down = false;
-}
-
-function correctDeltaX (delta) {
-    let aspectRatio = canvas.width / canvas.height;
-    if (aspectRatio < 1) delta *= aspectRatio;
-    return delta;
-}
-
-function correctDeltaY (delta) {
-    let aspectRatio = canvas.width / canvas.height;
-    if (aspectRatio > 1) delta /= aspectRatio;
-    return delta;
 }
 
 function generateColor () {
@@ -1630,15 +2117,17 @@ function wrap (value, min, max) {
     return (value - min) % range + min;
 }
 
+// Uses the CSS size so changing the render scale (which only rounds differently) never
+// reallocates the simulation buffers.
 function getResolution (resolution) {
-    let aspectRatio = gl.drawingBufferWidth / gl.drawingBufferHeight;
+    let aspectRatio = cssWidth / cssHeight;
     if (aspectRatio < 1)
         aspectRatio = 1.0 / aspectRatio;
 
     let min = Math.round(resolution);
     let max = Math.round(resolution * aspectRatio);
 
-    if (gl.drawingBufferWidth > gl.drawingBufferHeight)
+    if (cssWidth > cssHeight)
         return { width: max, height: min };
     else
         return { width: min, height: max };
@@ -1651,9 +2140,10 @@ function getTextureScale (texture, width, height) {
     };
 }
 
-function scaleByPixelRatio (input) {
-    let pixelRatio = window.devicePixelRatio || 1;
-    return Math.floor(input * pixelRatio);
+// Capped at MAX_PIXEL_RATIO (phones report 3x) and scaled down further by the frame-time governor.
+function scaleByPixelRatio (value) {
+    let pixelRatio = Math.min(window.devicePixelRatio || 1, config.MAX_PIXEL_RATIO) * qualityFactor;
+    return Math.max(1, Math.floor(value * pixelRatio));
 }
 
 function hashCode (s) {
