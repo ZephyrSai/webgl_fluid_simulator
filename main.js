@@ -49,8 +49,8 @@ let config = {
     BLOOM: true,
     BLOOM_ITERATIONS: 8,
     BLOOM_RESOLUTION: 256,
-    BLOOM_INTENSITY: 0.8,
-    BLOOM_THRESHOLD: 0.6,
+    BLOOM_INTENSITY: 0.55,
+    BLOOM_THRESHOLD: 0.75,
     BLOOM_SOFT_KNEE: 0.7,
     SUNRAYS: true,
     SUNRAYS_RESOLUTION: 196,
@@ -384,7 +384,9 @@ function bindMusicUI () {
     music.onNote = (pointerId, midi) => {
         const pointer = input.pointers.get(pointerId);
         if (!pointer || !config.COLORFUL) return;
-        pointer.color = noteColor(midi);
+        // Lean towards the note's hue instead of jumping to it, so strokes stay saturated.
+        pointer.hue = mixHue(pointer.hue, noteHue(midi), 0.35);
+        pointer.color = hueColor(pointer.hue);
         pointer.colorLockUntil = performance.now() + 450;
     };
     refreshSoundUI();
@@ -772,9 +774,20 @@ const displayShaderSource = `
     uniform vec2 ditherScale;
     uniform vec2 texelSize;
 
+    #define TONE_KNEE 0.55
+
     vec3 linearToGamma (vec3 color) {
         color = max(color, vec3(0));
         return max(1.055 * pow(color, vec3(0.416666667)) - 0.055, vec3(0));
+    }
+
+    // Soft shoulder on the brightest channel, applied to all three so hue and saturation are kept:
+    // dense dye saturates to a vivid color instead of every channel clipping to white.
+    vec3 toneMap (vec3 color) {
+        float peak = max(color.r, max(color.g, color.b));
+        if (peak <= TONE_KNEE) return color;
+        float mapped = TONE_KNEE + (1.0 - TONE_KNEE) * (1.0 - exp(-(peak - TONE_KNEE) / (1.0 - TONE_KNEE)));
+        return color * (mapped / peak);
     }
 
     void main () {
@@ -816,6 +829,7 @@ const displayShaderSource = `
         c += bloom;
     #endif
 
+        c = toneMap(c);
         float a = max(c.r, max(c.g, c.b));
         gl_FragColor = vec4(c, a);
     }
@@ -1530,7 +1544,11 @@ function updateColors (dt, now) {
         colorUpdateTimer = wrap(colorUpdateTimer, 0, 1);
         for (const p of input.pointers.values()) {
             // Pointers that just played a note keep that note's color.
-            if (now >= p.colorLockUntil) p.color = generateColor();
+            if (now < p.colorLockUntil) continue;
+            // Drift through neighbouring hues. Jumping to a random hue ten times a second put the whole
+            // rainbow into every stroke, and additive mixing of all hues is white.
+            p.hue = ((p.hue + (Math.random() - 0.25) * 0.05) % 1 + 1) % 1;
+            p.color = hueColor(p.hue);
         }
     }
 }
@@ -1624,7 +1642,8 @@ function applyInputs (now) {
 // ---------------------------------------------------------------- input handlers
 
 function handlePointerDown (pointer) {
-    pointer.color = generateColor();
+    pointer.hue = Math.random();
+    pointer.color = hueColor(pointer.hue);
     music.pointerDown(pointer);
     needsRender = true;
 }
@@ -1643,7 +1662,7 @@ function handlePointerUp (pointer) {
 function handleTap (pointer) {
     const midi = music.tap(pointer);
     const s = strokeScales(pointer);
-    const base = midi != null && config.COLORFUL ? noteColor(midi) : (pointer.color || generateColor());
+    const base = midi != null && config.COLORFUL ? hueColor(noteHue(midi)) : (pointer.color || generateColor());
     pendingDroplets.push({ x: pointer.x, y: pointer.y, color: scaleColor(base, 2.2 * s.dye, {}), radius: baseRadius() * s.size * 1.2 });
     pendingForces.push({ x: pointer.x, y: pointer.y, radius: baseRadius() * s.size * 4, radial: 380 * s.force, swirl: (Math.random() < 0.5 ? -1 : 1) * 140 * s.force });
 }
@@ -2038,13 +2057,24 @@ function scaleColor (color, amount, out = tempColor) {
 }
 
 // Pitch class → hue around the circle of fifths, so consonant notes get neighbouring colors.
-function noteColor (midi) {
-    const hue = ((((midi % 12) * 7) % 12) / 12 + (Math.random() - 0.5) * 0.04 + 1) % 1;
-    const c = HSVtoRGB(hue, 0.9, 1.0);
+function noteHue (midi) {
+    return (((midi % 12) * 7) % 12) / 12;
+}
+
+function hueColor (hue) {
+    const c = HSVtoRGB(hue, 1.0, 1.0);
     c.r *= 0.15;
     c.g *= 0.15;
     c.b *= 0.15;
     return c;
+}
+
+// Moves hue `a` towards `b` by `amount` along the shorter way around the color wheel.
+function mixHue (a, b, amount) {
+    let d = b - a;
+    if (d > 0.5) d -= 1;
+    else if (d < -0.5) d += 1;
+    return ((a + d * amount) % 1 + 1) % 1;
 }
 
 function correctRadius (radius) {
