@@ -54,8 +54,6 @@ class TrackedPointer {
         this.gestureX = 0;
         this.gestureY = 0;
         this.color = null;
-        this.hue = 0;
-        this.colorLockUntil = 0;
     }
 }
 

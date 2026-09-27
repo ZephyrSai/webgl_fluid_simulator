@@ -24,7 +24,9 @@ Built on Pavel Dobryakov's original WebGL Fluid Simulation (MIT).
 | Three-finger tap | Color burst | Impact: crash, sub drop and chord stab |
 | Apple Pencil / stylus | Pressure sets stroke size and ink; tilt widens it | Pressure sets loudness and brightness; tilt adds breath |
 
-The music builds from ambient to intense the more vigorously you play, and settles back when you stop. Choose the **Mood** (Adaptive, Ambient, Intense), **Scale** and **Volume** in the panel. Colors of plucked notes follow their pitch.
+The music builds from ambient to intense the more vigorously you play, and settles back when you stop. Choose the **Mood** (Adaptive, Ambient, Intense), **Scale** and **Volume** in the panel.
+
+If heavy painting washes out to white too quickly for you, lower **Ink amount** in the panel.
 
 Keyboard: `Space` burst · `P` pause · `F` fullscreen · `M` mute · `H` hide controls.
 

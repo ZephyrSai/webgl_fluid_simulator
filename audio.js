@@ -177,7 +177,6 @@ export class MusicEngine {
         this.melody = [];
 
         this.onBeat = null;
-        this.onNote = null;
         this.onChord = null;
         this.onStateChange = null;
 
@@ -707,7 +706,6 @@ export class MusicEngine {
             st.lastPluck = midi;
             const velocity = Math.min(1, (0.3 + 0.7 * speed) * (st.type === 'pen' ? 0.45 + 0.75 * st.pressure : 1));
             this.pluck(midi, time, velocity, (st.x * 2 - 1) * 0.75, st.y, st.type === 'pen' ? 'pen' : 'finger');
-            if (this.onNote) this.onNote(id, midi);
         }
 
         if (s16 % 4 === 0 && this.onBeat) {
