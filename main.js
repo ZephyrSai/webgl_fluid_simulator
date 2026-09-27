@@ -297,6 +297,10 @@ function bindUI () {
 
     window.addEventListener('keydown', e => {
         if (e.target && e.target.closest && e.target.closest('input, select, textarea')) return;
+        // Leave browser shortcuts (Cmd/Ctrl+F, +P, +H, +M) alone, and don't retrigger while a key is held.
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.code === 'Space') e.preventDefault();
+        if (e.repeat) return;
         music.unlock();
         switch (e.code) {
             case 'KeyP':
@@ -313,7 +317,6 @@ function bindUI () {
                 setPanelHidden(!document.body.classList.contains('panel-hidden'));
                 break;
             case 'Space':
-                e.preventDefault();
                 triggerBurst();
                 break;
         }
@@ -516,7 +519,7 @@ function captureScreenshot () {
         if (!blob) return;
         const url = URL.createObjectURL(blob);
         downloadURI('fluid.png', url);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     });
 }
 
@@ -1455,6 +1458,18 @@ let hudUpdateTime = 0;
 if (window.ResizeObserver) new ResizeObserver(() => { needsResize = true; }).observe(canvas);
 window.addEventListener('resize', () => { needsResize = true; });
 window.addEventListener('orientationchange', () => { needsResize = true; });
+watchPixelRatio();
+
+function watchPixelRatio () {
+    if (!window.matchMedia) return;
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    const onChange = () => {
+        needsResize = true;
+        watchPixelRatio();
+    };
+    if (query.addEventListener) query.addEventListener('change', onChange, { once: true });
+    else if (query.addListener) query.addListener(onChange);
+}
 
 requestAnimationFrame(update);
 
@@ -1473,7 +1488,7 @@ function update (now) {
         }
     }
     updateColors(dt, now);
-    updateFallbackBeat(dt);
+    updateFallbackBeat(Math.min(Math.max(interval, 0), 250) / 1000);
     if (applyInputs(now))
         needsRender = true;
     if (!config.PAUSED) {
@@ -1554,12 +1569,13 @@ function updateColors (dt, now) {
 }
 
 // Held pointers pulse on the beat; without sound, keep a steady pulse so the gesture still works.
-function updateFallbackBeat (dt) {
+// `elapsed` is real time, not the capped simulation step, so the tempo holds at 30fps too.
+function updateFallbackBeat (elapsed) {
     if (music.running) {
         fallbackBeatTimer = 0;
         return;
     }
-    fallbackBeatTimer += dt;
+    fallbackBeatTimer += elapsed;
     if (fallbackBeatTimer >= FALLBACK_BEAT) {
         fallbackBeatTimer -= FALLBACK_BEAT;
         if (config.BEAT_PULSES) queueBeatPulses(0.45);

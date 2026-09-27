@@ -16,8 +16,10 @@ const PATH_CAPACITY = 64;       // samples buffered per pointer between frames
 const SPEED_SMOOTHING = 0.05;   // s
 const SPEED_DECAY = 0.08;       // s, once a pointer stops sending events
 const MIN_GESTURE_SPREAD = 24;  // CSS px
-const PINCH_THRESHOLD = 0.0025; // relative spread change per frame
-const TWIST_THRESHOLD = 0.003;  // radians per frame
+const PINCH_LOCK = 0.06;        // total relative spread change before a pinch counts
+const TWIST_LOCK = 0.12;        // total rotation (radians) before a twist counts
+const COHERENCE = 0.7;          // share of the fingers' motion that must be the pinch/twist
+const UNLOCK_FRAMES = 6;        // incoherent frames in a row before a gesture has to be re-earned
 
 class TrackedPointer {
     constructor () {
@@ -49,7 +51,8 @@ class TrackedPointer {
         this.lastSeen = 0;
         this.lastEventTs = 0;
         this.travel = 0;
-        this.gestureAngle = 0;
+        this.gestureX = 0;
+        this.gestureY = 0;
         this.color = null;
         this.hue = 0;
         this.colorLockUntil = 0;
@@ -60,7 +63,7 @@ export function createInput (element, handlers = {}) {
     const pointers = new Map();
     const pool = [];
     const recentTaps = [];
-    const gesture = { key: '', spread: 0 };
+    const gesture = { key: '', pinch: 0, twist: 0, pinchLocked: false, twistLocked: false, pinchMiss: 0, twistMiss: 0 };
     let bounds = element.getBoundingClientRect();
     let touchPressure = false;
     let lastUpdate = performance.now();
@@ -224,21 +227,24 @@ export function createInput (element, handlers = {}) {
         for (const other of pointers.values())
             if (other.type === 'touch' && now - other.startTime < TAP_MAX_MS) return;
 
-        // Only a real multi-finger tap: all fingers were on the glass at the same moment.
+        // Only a real multi-finger tap: the taps that overlap the latest one, all on the glass at once.
+        // (A stray earlier tap in the window must not cancel the chord.)
+        const latest = recentTaps[recentTaps.length - 1];
+        const chord = recentTaps.filter(t => t.start <= latest.end && t.end >= latest.start);
+        if (chord.length < MULTI_TAP_MIN) return;
         let latestStart = 0;
         let earliestEnd = Infinity;
         let x = 0;
         let y = 0;
-        for (const t of recentTaps) {
+        for (const t of chord) {
             latestStart = Math.max(latestStart, t.start);
             earliestEnd = Math.min(earliestEnd, t.end);
             x += t.x;
             y += t.y;
         }
         if (latestStart > earliestEnd) return;
-        const count = recentTaps.length;
         recentTaps.length = 0;
-        if (handlers.onMultiTap) handlers.onMultiTap(count, x / count, y / count);
+        if (handlers.onMultiTap) handlers.onMultiTap(chord.length, x / chord.length, y / chord.length);
     }
 
     // Called once per animation frame, before the pointers are consumed.
@@ -254,6 +260,9 @@ export function createInput (element, handlers = {}) {
     }
 
     // Pinch/spread and twist from two or more touches, measured around their centroid.
+    // Each finger's own movement is split into radial and tangential parts. It only counts as a
+    // pinch (twist) when every finger moves the same way radially (tangentially) and that makes up
+    // most of their motion, so painting with several fingers doesn't set off gestures.
     function detectTransform () {
         let count = 0;
         let cx = 0;
@@ -273,40 +282,92 @@ export function createInput (element, handlers = {}) {
         cx /= count;
         cy /= count;
 
-        let spread = 0;
-        for (const p of pointers.values())
-            if (p.type === 'touch') spread += Math.hypot(p.clientX - cx, p.clientY - cy);
-        spread /= count;
-
         if (key !== gesture.key) {
             // A finger joined or left: restart from the new configuration instead of jumping.
             gesture.key = key;
-            gesture.spread = spread;
-            for (const p of pointers.values())
-                if (p.type === 'touch') p.gestureAngle = Math.atan2(cy - p.clientY, p.clientX - cx);
+            gesture.pinch = 0;
+            gesture.twist = 0;
+            gesture.pinchLocked = false;
+            gesture.twistLocked = false;
+            gesture.pinchMiss = 0;
+            gesture.twistMiss = 0;
+            for (const p of pointers.values()) {
+                if (p.type !== 'touch') continue;
+                p.gestureX = p.clientX;
+                p.gestureY = p.clientY;
+            }
             return;
         }
 
+        let spread = 0;
+        let motion = 0;
+        let radialSum = 0;
+        let radialMin = Infinity;
+        let radialMax = -Infinity;
+        let tangentialSum = 0;
+        let tangentialMin = Infinity;
+        let tangentialMax = -Infinity;
+        let scale = 0;
         let turn = 0;
         for (const p of pointers.values()) {
             if (p.type !== 'touch') continue;
-            const angle = Math.atan2(cy - p.clientY, p.clientX - cx);
-            let delta = angle - p.gestureAngle;
-            if (delta > Math.PI) delta -= 2 * Math.PI;
-            else if (delta < -Math.PI) delta += 2 * Math.PI;
-            turn += delta;
-            p.gestureAngle = angle;
+            const dx = p.clientX - p.gestureX;
+            const dy = p.clientY - p.gestureY;
+            p.gestureX = p.clientX;
+            p.gestureY = p.clientY;
+            const ox = p.clientX - cx;
+            const oy = cy - p.clientY; // y up, so counter-clockwise is positive
+            const distance = Math.max(1, Math.hypot(ox, oy));
+            const rx = ox / distance;
+            const ry = oy / distance;
+            const radial = dx * rx - dy * ry;
+            const tangential = -dx * ry - dy * rx;
+            spread += distance;
+            motion += Math.hypot(dx, dy);
+            radialSum += Math.abs(radial);
+            radialMin = Math.min(radialMin, radial);
+            radialMax = Math.max(radialMax, radial);
+            tangentialSum += Math.abs(tangential);
+            tangentialMin = Math.min(tangentialMin, tangential);
+            tangentialMax = Math.max(tangentialMax, tangential);
+            scale += radial / distance;
+            turn += tangential / distance;
         }
+        spread /= count;
+        scale /= count;
         turn /= count;
-        const scale = gesture.spread > 1 ? spread / gesture.spread - 1 : 0;
-        gesture.spread = spread;
-        if (spread < MIN_GESTURE_SPREAD) return;
+        if (spread < MIN_GESTURE_SPREAD || motion < 0.5) return;
+
+        // Same sign for every finger, and every finger doing a fair share of it.
+        const pinching = (radialMin > 0 || radialMax < 0) &&
+            Math.min(Math.abs(radialMin), Math.abs(radialMax)) > 0.3 * Math.max(Math.abs(radialMin), Math.abs(radialMax)) &&
+            radialSum > COHERENCE * motion;
+        const twisting = (tangentialMin > 0 || tangentialMax < 0) &&
+            Math.min(Math.abs(tangentialMin), Math.abs(tangentialMax)) > 0.3 * Math.max(Math.abs(tangentialMin), Math.abs(tangentialMax)) &&
+            tangentialSum > COHERENCE * motion;
+
+        gesture.pinch = pinching ? gesture.pinch + scale : gesture.pinch * 0.8;
+        gesture.twist = twisting ? gesture.twist + turn : gesture.twist * 0.8;
+        gesture.pinchMiss = pinching ? 0 : gesture.pinchMiss + 1;
+        gesture.twistMiss = twisting ? 0 : gesture.twistMiss + 1;
+        if (gesture.pinchMiss >= UNLOCK_FRAMES) {
+            gesture.pinchLocked = false;
+            gesture.pinch = 0;
+        } else if (Math.abs(gesture.pinch) > PINCH_LOCK) {
+            gesture.pinchLocked = true;
+        }
+        if (gesture.twistMiss >= UNLOCK_FRAMES) {
+            gesture.twistLocked = false;
+            gesture.twist = 0;
+        } else if (Math.abs(gesture.twist) > TWIST_LOCK) {
+            gesture.twistLocked = true;
+        }
 
         const x = cx / bounds.width;
         const y = 1.0 - cy / bounds.height;
         const radius = spread / bounds.height;
-        if (Math.abs(scale) > PINCH_THRESHOLD && handlers.onPinch) handlers.onPinch(scale, x, y, radius);
-        if (Math.abs(turn) > TWIST_THRESHOLD && handlers.onTwist) handlers.onTwist(turn, x, y, radius);
+        if (pinching && gesture.pinchLocked && handlers.onPinch) handlers.onPinch(scale, x, y, radius);
+        if (twisting && gesture.twistLocked && handlers.onTwist) handlers.onTwist(turn, x, y, radius);
     }
 
     return { pointers, update };

@@ -218,6 +218,7 @@ export class MusicEngine {
             this.startScheduler();
             this.notifyState();
         }
+        this.startTimer();
         if (this.ctx.state !== 'running') {
             // Older iOS only unlocks output once a buffer has been started inside the gesture.
             const silent = this.ctx.createBufferSource();
@@ -243,13 +244,16 @@ export class MusicEngine {
             this.releaseAllVoices();
             this.master.gain.setTargetAtTime(0, now, 0.06);
             setTimeout(() => {
-                if (!this.enabled && this.ctx.state === 'running') this.ctx.suspend();
+                if (this.enabled) return;
+                this.stopTimer();
+                if (this.ctx.state === 'running') this.ctx.suspend();
             }, 400);
         }
         this.notifyState();
     }
 
     suspend () {
+        this.stopTimer();
         if (this.ctx && this.ctx.state === 'running') {
             this.releaseAllVoices();
             this.ctx.suspend();
@@ -257,7 +261,9 @@ export class MusicEngine {
     }
 
     resume () {
-        if (this.ctx && this.enabled && this.ctx.state !== 'running') {
+        if (!this.ctx || !this.enabled) return;
+        this.startTimer();
+        if (this.ctx.state !== 'running') {
             const resumed = this.ctx.resume();
             if (resumed && resumed.catch) resumed.catch(() => {});
         }
@@ -403,7 +409,7 @@ export class MusicEngine {
         this.voiceBus.gain.value = 1.5;
         this.voiceBus.connect(this.bus);
 
-        this.noise = createNoise(ctx, 2);
+        this.noise = createNoise(ctx, 4);
     }
 
     updateDelayTime () {
@@ -461,7 +467,18 @@ export class MusicEngine {
     startScheduler () {
         this.nextStepTime = this.ctx.currentTime + 0.08;
         this.lastTick = this.ctx.currentTime;
-        this.timer = setInterval(() => this.tick(), TICK_MS);
+        this.startTimer();
+    }
+
+    // The timer only runs while audio can play, so a muted or backgrounded page doesn't keep waking up.
+    startTimer () {
+        if (this.timer === null && this.ctx) this.timer = setInterval(() => this.tick(), TICK_MS);
+    }
+
+    stopTimer () {
+        if (this.timer === null) return;
+        clearInterval(this.timer);
+        this.timer = null;
     }
 
     tick () {
@@ -1256,8 +1273,14 @@ export class MusicEngine {
     }
 
     updatePointer (p) {
-        const st = this.pointerState.get(p.id);
-        if (!st) return;
+        let st = this.pointerState.get(p.id);
+        if (!st) {
+            // A finger that was already down when audio started (the context resumes asynchronously,
+            // or sound was just unmuted) joins in instead of staying silent until it lifts.
+            if (!this.running) return;
+            this.pointerDown(p);
+            st = this.pointerState.get(p.id);
+        }
         st.x = p.x;
         st.y = p.y;
         st.pressure = p.pressure;
