@@ -472,6 +472,55 @@ input[type="range"] {
     }
 }
 
+/* Immersive mode (iPhone, Chrome on iPad): the app's own bars go away, the canvas fills the page. */
+.is-immersive .chrome {
+    display: none;
+}
+
+.immersive-exit {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    z-index: 4;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border-radius: 50%;
+    opacity: 0.55;
+}
+
+.is-immersive .immersive-exit {
+    display: inline-flex;
+}
+
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: max(24px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    z-index: 6;
+    width: max-content;
+    max-width: min(88vw, 520px);
+    padding: 12px 16px;
+    border-radius: 14px;
+    border: 1px solid var(--panel-border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: center;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(16px);
+    pointer-events: none;
+}
+
+.toast[hidden] {
+    display: none;
+}
+
 /* Fullscreen is for playing: keep the bar out of the way until it's needed. */
 .is-fullscreen .topbar {
     opacity: 0.35;

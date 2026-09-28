@@ -80,6 +80,11 @@ let qualityFactor = 1;
 let cssWidth = 1;
 let cssHeight = 1;
 let contextLost = false;
+// fullscreen state (read while the UI is being bound, so it has to be declared up here)
+let panelHiddenBeforeFullscreen = false;
+let nativeFullscreen = false;
+let immersiveTipShown = false;
+let tipTimer = null;
 
 resizeCanvas();
 
@@ -312,6 +317,9 @@ function bindUI () {
             case 'KeyF':
                 toggleFullscreen();
                 break;
+            case 'Escape':
+                setImmersive(false);
+                break;
             case 'KeyM':
                 setSoundEnabled(!music.enabled);
                 break;
@@ -431,22 +439,47 @@ function saveMusicPrefs () {
     } catch (e) { /* storage unavailable */ }
 }
 
-let panelHiddenBeforeFullscreen = false;
 
+// Real fullscreen where the browser allows it. iPhone browsers, and Chrome/Edge/Firefox on iPad,
+// don't let a page go fullscreen, so there the button switches to an immersive mode instead: the
+// app's own bars disappear and the canvas fills everything the browser gives it. Launched from the
+// Home Screen the app is already fullscreen, so the button isn't needed.
 function bindFullscreen () {
     const button = document.getElementById('fullscreen');
     if (!button) return;
     const root = document.documentElement;
-    const supported = !!(root.requestFullscreen || root.webkitRequestFullscreen) &&
+    nativeFullscreen = !!(root.requestFullscreen || root.webkitRequestFullscreen) &&
         !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
-    // iPhone Safari has no element fullscreen; "Add to Home Screen" runs the app full-screen instead.
-    if (!supported) {
+    const standalone = navigator.standalone === true ||
+        (window.matchMedia && window.matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches);
+    if (standalone && !nativeFullscreen) {
         button.hidden = true;
         return;
     }
     button.addEventListener('click', toggleFullscreen);
+    const exit = document.getElementById('immersive-exit');
+    if (exit) exit.addEventListener('click', () => setImmersive(false));
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+}
+
+function setImmersive (on) {
+    if (on == document.body.classList.contains('is-immersive')) return;
+    document.body.classList.toggle('is-immersive', on);
+    applyFullscreenUI(on);
+    if (on && !immersiveTipShown && window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
+        immersiveTipShown = true;
+        showTip('For true full screen: Share › Add to Home Screen, then open Fluid Studio from there.');
+    }
+}
+
+function showTip (text) {
+    const tip = document.getElementById('toast');
+    if (!tip) return;
+    tip.textContent = text;
+    tip.hidden = false;
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => { tip.hidden = true; }, 5500);
 }
 
 function isFullscreen () {
@@ -454,6 +487,14 @@ function isFullscreen () {
 }
 
 function toggleFullscreen () {
+    if (document.body.classList.contains('is-immersive')) {
+        setImmersive(false);
+        return;
+    }
+    if (!nativeFullscreen) {
+        setImmersive(true);
+        return;
+    }
     const root = document.documentElement;
     try {
         let result;
@@ -464,8 +505,11 @@ function toggleFullscreen () {
         } else if (root.webkitRequestFullscreen) {
             result = root.webkitRequestFullscreen();
         }
-        if (result && result.catch) result.catch(() => {});
-    } catch (e) { /* denied */ }
+        // refused (e.g. a browser that reports support but won't do it): go immersive instead
+        if (result && result.catch) result.catch(() => setImmersive(true));
+    } catch (e) {
+        setImmersive(true);
+    }
 }
 
 function onFullscreenChange () {
@@ -473,6 +517,10 @@ function onFullscreenChange () {
     // Safari can fire both the prefixed and unprefixed event; only react to real transitions.
     if (active == document.body.classList.contains('is-fullscreen')) return;
     document.body.classList.toggle('is-fullscreen', active);
+    applyFullscreenUI(active);
+}
+
+function applyFullscreenUI (active) {
     const button = document.getElementById('fullscreen');
     if (button) {
         button.setAttribute('aria-pressed', String(active));

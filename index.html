@@ -247,6 +247,12 @@
         </section>
     </div>
 
+    <!-- immersive mode (where the browser can't go fullscreen): the way back -->
+    <button id="immersive-exit" class="immersive-exit" type="button" aria-label="Exit full screen" title="Exit full screen">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+    </button>
+    <div class="toast" id="toast" role="status" hidden></div>
+
     <script type="module" src="./main.js"></script>
 </body>
 </html>
