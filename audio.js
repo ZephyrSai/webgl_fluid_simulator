@@ -3,11 +3,15 @@
 // Everything is synthesized live with the Web Audio API: no samples, no audio files.
 //
 // The arrangement follows touch. Left alone, the music rests on a light bed: a soft, dark pad
-// and the occasional distant bell. The moment a finger lands the pulse comes in (shaker, sub,
-// soft bass), and the more vigorously the canvas is played the further it builds:
-//   bed → sub + shaker + pulse bass + hats → kick + clap → auto arpeggio
-//   → stabs, open hats, risers and crashes (intense)
+// and the occasional distant bell. The moment a finger lands the beat comes in on the next beat
+// (kick, bassline, sub, hats), and the faster and more fingers you play, the further it builds:
+//   bed → kick + bassline + sub + hats → clap + percussion → driving kick → arpeggio
+//   → 16th hats, driven bass, stabs, open hats, risers and crashes
 // Lift your fingers and it settles back to the bed within a few seconds.
+//
+// Every page load composes its own track: a new key, tempo and swing, generated drum,
+// percussion and bass grooves, an arpeggio style, and slightly different drum and bass sounds.
+// The grooves keep mutating every few bars, so the beat evolves instead of looping.
 //
 // Touch input plays on top of that bed:
 //   - every finger / pen owns a sustained voice whose pitch follows x (scale-quantized),
@@ -16,7 +20,6 @@
 //   - taps ring bells, twists play scale runs, pinch/spread sweep a master filter,
 //     multi-finger taps fire an impact
 
-const ROOT = 50; // D3
 const LOOKAHEAD = 0.12; // seconds of audio scheduled ahead of the clock
 const TICK_MS = 25;
 const MAX_LIVE_VOICES = 56;
@@ -25,10 +28,24 @@ const MAX_SUSTAINED_VOICES = 6;
 const NOTE_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
 
 const MOODS = {
-    ambient:  { bpm: 84 },
-    adaptive: { bpm: 100 },
-    intense:  { bpm: 118 },
+    ambient:  { tempo: [74, 88] },
+    adaptive: { tempo: [92, 108] },
+    intense:  { tempo: [112, 128] },
 };
+
+// Groove building blocks (16 steps per bar). A session picks from these and then mutates them.
+const KICK_LIGHT = [[0, 8], [0, 10], [0, 7], [0, 8, 11], [0, 6, 10]];
+const KICK_DRIVE = [[0, 4, 8, 12], [0, 4, 8, 12], [0, 3, 8, 12], [0, 6, 8, 14], [0, 4, 7, 10, 12], [0, 3, 6, 10, 12]];
+const SNARES = [[4, 12], [4, 12], [4, 12, 15], [8], [4, 11, 12]];
+const BASS_RHYTHMS = [
+    [0, 2, 4, 6, 8, 10, 12, 14],
+    [0, 3, 6, 8, 11, 14],
+    [0, 2, 3, 6, 8, 10, 11, 14],
+    [0, 4, 6, 8, 12, 14],
+    [0, 3, 4, 7, 8, 11, 12, 15],
+];
+const BASS_MOVES = [0, 0, 0, 12, 12, 7, -5, 10];
+const ARP_SHAPES = ['up', 'down', 'updown', 'converge', 'wander'];
 
 // `steps` is the 7-note mode, `melody` the consonant subset touch input is quantized to,
 // `graph` a weighted Markov chain over scale degrees used to generate chord progressions.
@@ -90,11 +107,68 @@ const SCALES = {
 };
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const pick = list => list[Math.floor(Math.random() * list.length)];
+const between = (lo, hi) => lo + Math.random() * (hi - lo);
 const mtof = midi => 440 * Math.pow(2, (midi - 69) / 12);
 const ramp = (lo, hi, v) => {
     const t = clamp((v - lo) / (hi - lo), 0, 1);
     return t * t * (3 - 2 * t);
 };
+
+// The track for this page load: key, tempo, swing, grooves, arpeggio and sound character.
+function createStyle () {
+    const hatAccents = [];
+    for (let i = 0; i < 16; i++) hatAccents.push(i % 4 === 2 ? between(0.8, 1) : i % 2 === 0 ? between(0.45, 0.7) : between(0.2, 0.45));
+    const perc = new Array(16).fill(0);
+    const percHits = 2 + Math.floor(Math.random() * 3);
+    for (let k = 0; k < percHits; k++) perc[pick([3, 5, 6, 7, 9, 11, 13, 14, 15])] = between(0.5, 1);
+    const bassNotes = [];
+    for (let i = 0; i < 16; i++) bassNotes.push(i === 0 ? 0 : pick(BASS_MOVES));
+    return {
+        root: 47 + Math.floor(Math.random() * 9),            // B2..G3: a different key each visit
+        tempo: {
+            ambient: between(...MOODS.ambient.tempo),
+            adaptive: between(...MOODS.adaptive.tempo),
+            intense: between(...MOODS.intense.tempo),
+        },
+        swing: pick([0, 0, 0.05, 0.1, 0.14]),                  // delay of the off-16ths, in steps
+        kickLight: pick(KICK_LIGHT).slice(),
+        kickDrive: pick(KICK_DRIVE).slice(),
+        snare: pick(SNARES).slice(),
+        hatAccents,
+        perc,
+        bassRhythm: pick(BASS_RHYTHMS).slice(),
+        bassNotes,
+        arp: { shape: pick(ARP_SHAPES), every: pick([1, 1, 2]), octaves: pick([1, 2, 2]) },
+        sound: {
+            kickPitch: between(125, 175), kickEnd: between(40, 52), kickDecay: between(0.3, 0.55), kickClick: between(0.1, 0.3),
+            clapFreq: between(1100, 2000), clapDecay: between(0.18, 0.32),
+            hatFreq: between(6000, 9500), hatDecay: between(0.035, 0.07),
+            bassWave: pick(['sawtooth', 'square']), bassQ: between(3, 8), bassSub: between(0.2, 0.5),
+            percFreq: between(180, 420),
+        },
+    };
+}
+
+// Small changes every few bars so the groove evolves: move a syncopated kick, re-accent the
+// hats, add or drop a percussion hit, change a bass note, and now and then a new bass rhythm.
+function mutateStyle (style, bar) {
+    if (Math.random() < 0.35) {
+        const k = style.kickDrive;
+        const extra = pick([3, 6, 7, 10, 11, 14]);
+        const i = k.indexOf(extra);
+        if (i > 0) k.splice(i, 1); else if (k.length < 6) k.push(extra);
+    }
+    for (let n = 0; n < 2; n++) {
+        const i = Math.floor(Math.random() * 16);
+        style.hatAccents[i] = i % 4 === 2 ? between(0.8, 1) : between(0.2, 0.7);
+    }
+    const p = pick([3, 5, 6, 7, 9, 11, 13, 14, 15]);
+    style.perc[p] = style.perc[p] ? 0 : between(0.5, 1);
+    style.bassNotes[1 + Math.floor(Math.random() * 15)] = pick(BASS_MOVES);
+    if (bar % 16 === 0 && Math.random() < 0.3) style.bassRhythm = pick(BASS_RHYTHMS).slice();
+    if (bar % 16 === 0 && Math.random() < 0.25) style.arp.shape = pick(ARP_SHAPES);
+}
 
 function weightedPick (options) {
     let total = 0;
@@ -150,6 +224,9 @@ export class MusicEngine {
         this.enabled = true;
         this.volume = 0.7;
         this.mood = 'adaptive';
+        this.style = createStyle();
+        this.root = this.style.root;
+        this.subOut = null;
         this.scaleName = 'aeolian';
         this.scale = SCALES.aeolian;
         this.pendingScale = null;
@@ -198,7 +275,7 @@ export class MusicEngine {
     }
 
     get stepDur () {
-        return 60 / MOODS[this.mood].bpm / 4;
+        return 60 / this.style.tempo[this.mood] / 4;
     }
 
     // Must be called from a user gesture (pointerup / touchend / click / keydown) the first time.
@@ -407,6 +484,12 @@ export class MusicEngine {
         this.bassClean.connect(this.duck);
         this.bassDriven.connect(this.duck);
 
+        // Sub bass plays every chord through this gate; the gate follows the level, so the sub
+        // arrives the moment a finger lands instead of waiting for the next chord change.
+        this.subOut = ctx.createGain();
+        this.subOut.gain.value = 0;
+        this.subOut.connect(this.duck);
+
         // Touch voices get their own bus so they sit above the bed.
         this.voiceBus = ctx.createGain();
         this.voiceBus.gain.value = 1.5;
@@ -416,7 +499,7 @@ export class MusicEngine {
     }
 
     updateDelayTime () {
-        const time = (60 / MOODS[this.mood].bpm) * 0.75;
+        const time = (60 / this.style.tempo[this.mood]) * 0.75;
         const now = this.ctx.currentTime;
         this.delayL.delayTime.setTargetAtTime(time, now, 0.2);
         this.delayR.delayTime.setTargetAtTime(time, now, 0.2);
@@ -538,9 +621,9 @@ export class MusicEngine {
     // as a finger lands, then up with energy. Moods set how far a touch takes it.
     effectiveEnergy () {
         let engaged;
-        if (this.mood === 'ambient') engaged = 0.18 + 0.2 * this.energy;       // stays below the drums
-        else if (this.mood === 'intense') engaged = 0.5 + 0.5 * this.energy;   // drums right away
-        else engaged = 0.38 + 0.62 * this.energy;                             // adaptive
+        if (this.mood === 'ambient') engaged = 0.1 + 0.14 * this.energy;       // shaker and sub, no drums
+        else if (this.mood === 'intense') engaged = 0.55 + 0.45 * this.energy; // driving from the first touch
+        else engaged = 0.4 + 0.6 * this.energy;                               // adaptive: touch = kick + bass
         return this.presence * engaged;
     }
 
@@ -555,8 +638,8 @@ export class MusicEngine {
     buildMelody () {
         const out = [];
         for (let octave = 0; octave < 3; octave++)
-            for (const s of this.scale.melody) out.push(ROOT + 12 * octave + s);
-        out.push(ROOT + 36);
+            for (const s of this.scale.melody) out.push(this.root + 12 * octave + s);
+        out.push(this.root + 36);
         this.melody = out;
     }
 
@@ -570,7 +653,7 @@ export class MusicEngine {
     }
 
     chordPitchClasses () {
-        return this.chordTones().map(t => (ROOT + t) % 12);
+        return this.chordTones().map(t => (this.root + t) % 12);
     }
 
     melodyIndexForX (x) {
@@ -597,9 +680,28 @@ export class MusicEngine {
         return candidates[Math.floor(Math.random() * candidates.length)];
     }
 
+    // Next arpeggio note: the chord laid out over one or two octaves, walked in the session's shape.
+    arpNote (i) {
+        const tones = this.chordTones();
+        const ladder = [];
+        for (let octave = 1; octave <= this.style.arp.octaves; octave++) for (const t of tones) ladder.push(this.root + t + 12 * octave);
+        ladder.push(ladder[0] + 12 * this.style.arp.octaves);
+        const n = ladder.length;
+        switch (this.style.arp.shape) {
+            case 'up': return ladder[i % n];
+            case 'down': return ladder[n - 1 - (i % n)];
+            case 'converge': { const k = i % n; return ladder[k % 2 ? n - 1 - (k >> 1) : k >> 1]; }
+            case 'wander': {
+                this.arpPos = clamp((this.arpPos == null ? 0 : this.arpPos) + pick([-1, 1, 1, 2, -2]), 0, n - 1);
+                return ladder[this.arpPos];
+            }
+            default: { const cycle = ladder.concat(ladder.slice(1, -1).reverse()); return cycle[i % cycle.length]; }
+        }
+    }
+
     bassRoot () {
-        let midi = ROOT - 12 + (this.tone(this.degree) % 12);
-        if (midi > ROOT - 5) midi -= 12;
+        let midi = this.root - 12 + (this.tone(this.degree) % 12);
+        if (midi > this.root - 5) midi -= 12;
         return midi;
     }
 
@@ -610,7 +712,7 @@ export class MusicEngine {
         let quality = third === 3 ? 'm' : '';
         if (fifth === 6) quality = '°';
         else if (fifth === 8) quality = '+';
-        return NOTE_NAMES[(ROOT + root) % 12] + quality;
+        return NOTE_NAMES[(this.root + root) % 12] + quality;
     }
 
     nextChord (time, bars) {
@@ -621,8 +723,7 @@ export class MusicEngine {
         const L = this.level;
         const duration = this.stepDur * 16 * bars;
         this.pad(time, duration, L);
-        const subGain = ramp(0.1, 0.3, L);
-        if (subGain > 0.02) this.sub(time, duration, subGain);
+        this.sub(time, duration, 1);
         if (L > 0.8) this.stab(time, 0.55 + 0.45 * ramp(0.8, 1, L));
 
         if (this.onChord) this.at(time, () => this.onChord && this.onChord(this.chordName));
@@ -647,9 +748,11 @@ export class MusicEngine {
 
         if (bar % 2 === 0 || this.degree < 0) this.nextChord(time, 2);
 
+        if (bar > 0 && bar % 4 === 0) mutateStyle(this.style, bar);
+
         const phrase = bar % 8;
-        if (phrase === 7 && L > 0.62) this.riser(time, this.stepDur * 16);
-        if (phrase === 0 && previous > 0.62) this.crash(time, 0.55 + 0.45 * L);
+        if (phrase === 7 && L > 0.7) this.riser(time, this.stepDur * 16);
+        if (phrase === 0 && previous > 0.7) this.crash(time, 0.55 + 0.45 * L);
     }
 
     // Called on every beat, so a touch changes the music within a beat, not a bar.
@@ -660,8 +763,9 @@ export class MusicEngine {
         this.padFilter.frequency.setTargetAtTime(420 + 3400 * (0.12 + L) * (0.6 + 0.4 * L), time, 0.8);
         this.bassDriven.gain.setTargetAtTime(0.55 * ramp(0.72, 0.95, L), time, 0.3);
         this.bassClean.gain.setTargetAtTime(1 - 0.4 * ramp(0.72, 0.95, L), time, 0.3);
-        // the drums arriving is an event: mark it
-        if (previous < 0.5 && L >= 0.5) this.crash(time, 0.55 + 0.45 * L);
+        this.subOut.gain.setTargetAtTime(ramp(0.06, 0.3, L), time, previous < L ? 0.08 : 0.6);
+        // the groove switching into its driving pattern is an event: mark it
+        if (previous < 0.6 && L >= 0.6) this.crash(time, 0.5 + 0.4 * L);
     }
 
     playStep (step, time) {
@@ -672,50 +776,62 @@ export class MusicEngine {
         const sd = this.stepDur;
         const rand = Math.random;
 
-        // Drums
+        const style = this.style;
+        // swing: the off-16ths land a little late
+        const t = s16 % 2 === 1 ? time + style.swing * sd : time;
+
+        // Kick: a light groove as soon as a finger lands, the driving groove with speed
         let kicked = false;
-        const kickGain = ramp(0.45, 0.6, L);
-        if (kickGain > 0.02) {
-            let hit = s16 === 0 || s16 === 8 || (L > 0.62 && (s16 === 4 || s16 === 12));
-            if (L > 0.85 && (s16 === 14 || s16 === 7) && rand() < 0.35) hit = true;
-            if (hit) {
-                this.kick(time, kickGain * (s16 % 8 === 0 ? 1 : 0.85));
-                kicked = true;
-            }
+        const drive = L >= 0.6;
+        const kickPattern = drive ? style.kickDrive : style.kickLight;
+        let kickGain = drive ? 0.8 + 0.2 * ramp(0.6, 0.9, L) : 0.75 * ramp(0.28, 0.4, L);
+        let kickHit = kickPattern.includes(s16);
+        if (!kickHit && L > 0.86 && s16 % 2 === 1 && rand() < 0.12) { kickHit = true; kickGain *= 0.7; }
+        if (kickHit && kickGain > 0.02) {
+            this.kick(t, kickGain * (s16 === 0 ? 1 : 0.88));
+            kicked = true;
         }
-        const clapGain = ramp(0.55, 0.7, L);
+
+        // Clap / snare on the session's backbeat, with ghost notes at full energy
+        const clapGain = ramp(0.48, 0.62, L);
         if (clapGain > 0.02) {
-            if (s16 === 4 || s16 === 12) this.clap(time, clapGain);
-            else if (L > 0.85 && s16 === 15 && rand() < 0.3) this.clap(time, clapGain * 0.35);
+            if (style.snare.includes(s16)) this.clap(t, clapGain);
+            else if (L > 0.85 && (s16 === 7 || s16 === 15) && rand() < 0.25) this.clap(t, clapGain * 0.3);
         }
-        const hatGain = ramp(0.3, 0.46, L);
-        if (hatGain > 0.02) {
-            if (s16 % 2 === 0) this.hat(time, hatGain * (s16 % 4 === 2 ? 0.9 : 0.5), L > 0.8 && s16 % 4 === 2);
-            else if (L > 0.7) this.hat(time, hatGain * (0.2 + 0.15 * rand()), false);
-        }
-        const shakerGain = ramp(0.12, 0.26, L) * (1 - hatGain);
-        if (shakerGain > 0.02 && s16 % 2 === 0) this.shaker(time, shakerGain * (s16 % 4 === 2 ? 1 : 0.55));
 
-        // Pulse bass
-        const bassGain = ramp(0.36, 0.55, L);
+        // Hats: eighths from the first touch, sixteenths and open hats as it heats up
+        const hatGain = ramp(0.3, 0.42, L);
+        if (hatGain > 0.02) {
+            const accent = style.hatAccents[s16];
+            if (s16 % 2 === 0) this.hat(t, hatGain * accent, L > 0.8 && s16 % 4 === 2 && rand() < 0.6);
+            else if (L > 0.7) this.hat(t, hatGain * accent * 0.7, false);
+        }
+        const shakerGain = ramp(0.05, 0.18, L) * (1 - hatGain);
+        if (shakerGain > 0.02 && s16 % 2 === 0) this.shaker(t, shakerGain * (s16 % 4 === 2 ? 1 : 0.55));
+
+        // Percussion: the session's own sparse pattern once things get going
+        const percGain = ramp(0.5, 0.68, L);
+        if (percGain > 0.02 && style.perc[s16]) this.perc(t, percGain * style.perc[s16]);
+
+        // Bassline: follows the session's rhythm; sparser at a light touch, busier with speed
+        const bassGain = ramp(0.26, 0.38, L);
         if (bassGain > 0.02) {
-            const sixteenths = L > 0.75;
-            if (sixteenths || s16 % 2 === 0) {
-                const pattern = [0, 0, 12, 0, 0, 12, 0, 7, 0, 0, 12, 0, 0, 12, 7, 12];
-                const offset = sixteenths ? pattern[s16] : (s16 % 4 === 2 ? 12 : 0);
-                this.bass(this.bassRoot() + offset, time, sd * (sixteenths ? 0.9 : 1.7), bassGain * (s16 % 4 === 0 ? 1 : 0.8), L);
+            const inRhythm = style.bassRhythm.includes(s16);
+            const light = L < 0.5;
+            const play = inRhythm ? (!light || s16 % 4 === 0 || s16 === style.bassRhythm[1]) : (L > 0.78 && rand() < 0.35);
+            if (play) {
+                const offset = style.bassNotes[s16] + (!inRhythm ? 12 : 0);
+                const next = style.bassRhythm.find(x => x > s16);
+                const len = ((next == null ? 16 : next) - s16) * sd * (L > 0.75 ? 0.8 : 0.95);
+                this.bass(this.bassRoot() + offset, t, Math.max(sd * 0.8, len), bassGain * (s16 % 4 === 0 ? 1 : 0.82), L);
             }
         }
 
-        // Auto arpeggio over the chord
-        const arpGain = ramp(0.6, 0.8, L);
-        if (arpGain > 0.02 && this.hasRoom()) {
-            const tones = this.chordTones();
-            const ladder = [];
-            for (let octave = 1; octave <= 2; octave++) for (const t of tones) ladder.push(ROOT + t + 12 * octave);
-            const up = ladder.concat(ladder.slice(1, -1).reverse());
-            const note = up[step % up.length];
-            this.pluck(note, time, 0.32 * arpGain, 0.5 + 0.35 * Math.sin(step * 0.37), 0.55, 'arp');
+        // Arpeggio over the chord, in this session's shape
+        const arpGain = ramp(0.62, 0.8, L);
+        if (arpGain > 0.02 && step % style.arp.every === 0 && this.hasRoom()) {
+            const note = this.arpNote(step / style.arp.every);
+            this.pluck(note, t, 0.32 * arpGain, 0.5 + 0.35 * Math.sin(step * 0.37), 0.55, 'arp');
         }
 
         // Generative bells: a rare, distant sparkle when left alone, a little more when playing
@@ -723,7 +839,7 @@ export class MusicEngine {
             const idle = this.presence < 0.1;
             const chance = idle ? 0.015 : 0.05 * (1 - 0.5 * L);
             if (rand() < chance && this.hasRoom()) {
-                const note = this.randomChordTone(ROOT + 22, ROOT + 41);
+                const note = this.randomChordTone(this.root + 22, this.root + 41);
                 const velocity = idle ? 0.18 + 0.15 * rand() : 0.3 + 0.3 * rand();
                 this.bell(note, time + rand() * 0.02, velocity, rand() * 1.4 - 0.7, idle ? 0.9 : 0.75);
             }
@@ -754,8 +870,8 @@ export class MusicEngine {
 
     pad (time, duration, L) {
         const ctx = this.ctx;
-        let base = ROOT + this.tone(this.degree);
-        if (base > ROOT + 6) base -= 12;
+        let base = this.root + this.tone(this.degree);
+        if (base > this.root + 6) base -= 12;
         const t = this.tone(this.degree);
         const notes = [
             base,
@@ -813,7 +929,7 @@ export class MusicEngine {
         g.gain.setValueAtTime(0.07 * gain, time + duration - 0.1);
         g.gain.linearRampToValueAtTime(0, time + duration + 0.4);
         osc.connect(g);
-        g.connect(this.duck);
+        g.connect(this.subOut);
         osc.start(time);
         osc.stop(time + duration + 0.5);
         this.track(osc);
@@ -822,17 +938,18 @@ export class MusicEngine {
     bass (midi, time, duration, gain, L) {
         const ctx = this.ctx;
         const f = mtof(midi);
+        const sound = this.style.sound;
         const osc = ctx.createOscillator();
-        osc.type = 'sawtooth';
+        osc.type = sound.bassWave;
         osc.frequency.value = f;
         const square = ctx.createOscillator();
         square.type = 'square';
         square.frequency.value = f / 2;
         const squareGain = ctx.createGain();
-        squareGain.gain.value = 0.35;
+        squareGain.gain.value = sound.bassSub;
         const filter = ctx.createBiquadFilter();
         filter.type = 'lowpass';
-        filter.Q.value = 5;
+        filter.Q.value = sound.bassQ;
         const peak = 220 + 2200 * L * gain;
         filter.frequency.setValueAtTime(peak, time);
         filter.frequency.exponentialRampToValueAtTime(Math.max(90, f * 1.2), time + duration);
@@ -969,7 +1086,7 @@ export class MusicEngine {
         filter.connect(out);
         let last = null;
         for (const t of this.chordTones()) {
-            const f = mtof(ROOT + 12 + t);
+            const f = mtof(this.root + 12 + t);
             for (const detune of [-14, 0, 14]) {
                 const osc = ctx.createOscillator();
                 osc.type = 'sawtooth';
@@ -987,17 +1104,18 @@ export class MusicEngine {
 
     kick (time, gain) {
         const ctx = this.ctx;
+        const sound = this.style.sound;
         const osc = ctx.createOscillator();
-        osc.frequency.setValueAtTime(155, time);
-        osc.frequency.exponentialRampToValueAtTime(44, time + 0.12);
+        osc.frequency.setValueAtTime(sound.kickPitch, time);
+        osc.frequency.exponentialRampToValueAtTime(sound.kickEnd, time + 0.12);
         const g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, time);
         g.gain.exponentialRampToValueAtTime(0.95 * gain, time + 0.004);
-        g.gain.exponentialRampToValueAtTime(0.0001, time + 0.45);
+        g.gain.exponentialRampToValueAtTime(0.0001, time + sound.kickDecay);
         osc.connect(g);
         g.connect(this.drums);
         osc.start(time);
-        osc.stop(time + 0.5);
+        osc.stop(time + sound.kickDecay + 0.05);
         this.track(osc);
 
         const click = this.noiseSource(time, 0.012);
@@ -1005,7 +1123,7 @@ export class MusicEngine {
         hp.type = 'highpass';
         hp.frequency.value = 2500;
         const clickGain = ctx.createGain();
-        clickGain.gain.setValueAtTime(0.22 * gain, time);
+        clickGain.gain.setValueAtTime(sound.kickClick * gain, time);
         clickGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.012);
         click.connect(hp);
         hp.connect(clickGain);
@@ -1019,10 +1137,11 @@ export class MusicEngine {
 
     clap (time, gain) {
         const ctx = this.ctx;
+        const sound = this.style.sound;
         const src = this.noiseSource(time, 0.3);
         const bp = ctx.createBiquadFilter();
         bp.type = 'bandpass';
-        bp.frequency.value = 1500;
+        bp.frequency.value = sound.clapFreq;
         bp.Q.value = 0.9;
         const g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, time);
@@ -1031,7 +1150,7 @@ export class MusicEngine {
             g.gain.exponentialRampToValueAtTime(0.06 * gain + 0.0001, time + offset + 0.01);
         }
         g.gain.setValueAtTime(0.54 * gain, time + 0.033);
-        g.gain.exponentialRampToValueAtTime(0.0001, time + 0.26);
+        g.gain.exponentialRampToValueAtTime(0.0001, time + sound.clapDecay);
         src.connect(bp);
         bp.connect(g);
         this.route(g, 0, 0.25, 0, this.drums);
@@ -1052,11 +1171,12 @@ export class MusicEngine {
 
     hat (time, gain, open) {
         const ctx = this.ctx;
-        const length = open ? 0.3 : 0.05;
+        const sound = this.style.sound;
+        const length = open ? 0.3 : sound.hatDecay;
         const src = this.noiseSource(time, length);
         const hp = ctx.createBiquadFilter();
         hp.type = 'highpass';
-        hp.frequency.value = 7200;
+        hp.frequency.value = sound.hatFreq;
         const g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, time);
         g.gain.exponentialRampToValueAtTime(0.28 * gain, time + 0.002);
@@ -1065,6 +1185,32 @@ export class MusicEngine {
         hp.connect(g);
         this.route(g, 0.2, open ? 0.12 : 0, 0, this.drums);
         this.track(src);
+    }
+
+    // Pitched percussion (rim / small tom), tuned per session.
+    perc (time, gain) {
+        const ctx = this.ctx;
+        const f = this.style.sound.percFreq;
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(f * 1.6, time);
+        osc.frequency.exponentialRampToValueAtTime(f, time + 0.03);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, time);
+        g.gain.exponentialRampToValueAtTime(0.22 * gain, time + 0.002);
+        g.gain.exponentialRampToValueAtTime(0.0001, time + 0.14);
+        const click = this.noiseSource(time, 0.02);
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = f * 6; bp.Q.value = 2;
+        const cg = ctx.createGain();
+        cg.gain.setValueAtTime(0.12 * gain, time);
+        cg.gain.exponentialRampToValueAtTime(0.0001, time + 0.02);
+        click.connect(bp); bp.connect(cg); cg.connect(g);
+        osc.connect(g);
+        this.route(g, between(-0.45, 0.45), 0.15, 0.1, this.drums);
+        osc.start(time);
+        osc.stop(time + 0.16);
+        this.track(osc);
     }
 
     shaker (time, gain) {

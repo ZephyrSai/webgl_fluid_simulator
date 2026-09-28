@@ -24,7 +24,7 @@ Built on Pavel Dobryakov's original WebGL Fluid Simulation (MIT).
 | Three-finger tap | Color burst | Impact: crash, sub drop and chord stab |
 | Apple Pencil / stylus | Pressure sets stroke size and ink; tilt widens it | Pressure sets loudness and brightness; tilt adds breath |
 
-The music builds from ambient to intense the more vigorously you play, and settles back when you stop. Choose the **Mood** (Adaptive, Ambient, Intense), **Scale** and **Volume** in the panel.
+Left alone, the music rests on a quiet ambient bed. A touch brings in the beat and bass on the next beat, and speed and extra fingers build it towards full intensity; let go and it settles back within a few seconds. Every visit composes a new track: its own key, tempo, swing, drum and bass grooves, and arpeggio style, and the grooves keep evolving as you play. Choose the **Mood** (Adaptive, Ambient, Intense), **Scale** and **Volume** in the panel.
 
 If heavy painting washes out to white too quickly for you, lower **Ink amount** in the panel.
 
