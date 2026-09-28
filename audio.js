@@ -170,6 +170,23 @@ function mutateStyle (style, bar) {
     if (bar % 16 === 0 && Math.random() < 0.25) style.arp.shape = pick(ARP_SHAPES);
 }
 
+// How intense the music should be for a given stroke speed (screen short-sides per second;
+// on a 1000px-tall screen, 0.35 = 350 px/s). Slow strokes stay light, medium strokes bring the
+// groove, fast strokes the full track.
+const SPEED_LEVELS = [[0, 0.28], [0.2, 0.34], [0.35, 0.42], [0.55, 0.52], [0.8, 0.64], [1.0, 0.75], [1.3, 0.88], [1.6, 1]];
+
+function levelForSpeed (s) {
+    if (s <= 0) return SPEED_LEVELS[0][1];
+    for (let i = 1; i < SPEED_LEVELS.length; i++) {
+        const [s1, l1] = SPEED_LEVELS[i];
+        if (s <= s1) {
+            const [s0, l0] = SPEED_LEVELS[i - 1];
+            return l0 + (l1 - l0) * (s - s0) / (s1 - s0);
+        }
+    }
+    return 1;
+}
+
 function weightedPick (options) {
     let total = 0;
     for (const option of options) total += option[1];
@@ -594,16 +611,18 @@ export class MusicEngine {
         const tau = touching ? 0.2 : 1.8;
         this.presence += ((touching ? 1 : 0) - this.presence) * (1 - Math.exp(-dt / tau));
 
-        // energy: builds with speed and the number of fingers while touching, drains once left alone
+        // energy: follows how fast the fastest hand is moving (plus a little per extra finger).
+        // It rises within about half a second, so a fast stroke brings the full track right away,
+        // and falls over ~2 s, so the pause at the end of a stroke doesn't drop the beat.
         if (touching) {
-            let drive = 0;
+            let target = 0;
             for (const st of this.pointerState.values()) {
-                const weight = st.type === 'pen' ? 0.5 + st.pressure : 1;
-                drive += (0.2 + 0.8 * st.speedN) * weight;
+                const speed = st.speed * (st.type === 'pen' ? 0.6 + 0.8 * st.pressure : 1);
+                target = Math.max(target, levelForSpeed(speed));
             }
-            // settles where effort balances the drain: a resting finger keeps a gentle pulse,
-            // slow strokes bring the beat, fast strokes or several fingers go all the way
-            this.energy += dt * (0.22 * drive * (1.05 - this.energy) - 0.05);
+            target = Math.min(1, target + 0.08 * (this.pointerState.size - 1));
+            const tau = target > this.energy ? 0.45 : 1.8;
+            this.energy += (target - this.energy) * (1 - Math.exp(-dt / tau));
         } else {
             this.energy *= Math.exp(-dt / 3);
         }
@@ -617,13 +636,14 @@ export class MusicEngine {
         }
     }
 
-    // Arrangement level: zero when nobody is touching (just the bed), an engaged floor as soon
-    // as a finger lands, then up with energy. Moods set how far a touch takes it.
+    // Arrangement level: zero when nobody is touching (just the bed); while touching it follows
+    // stroke speed. Moods set the range a touch covers.
     effectiveEnergy () {
+        const e = clamp((this.energy - 0.28) / 0.72, 0, 1);   // 0 at rest .. 1 at full speed
         let engaged;
-        if (this.mood === 'ambient') engaged = 0.1 + 0.14 * this.energy;       // shaker and sub, no drums
-        else if (this.mood === 'intense') engaged = 0.55 + 0.45 * this.energy; // driving from the first touch
-        else engaged = 0.4 + 0.6 * this.energy;                               // adaptive: touch = kick + bass
+        if (this.mood === 'ambient') engaged = 0.1 + 0.14 * e;          // shaker and sub, no drums
+        else if (this.mood === 'intense') engaged = 0.55 + 0.45 * e;    // driving from the first touch
+        else engaged = 0.28 + 0.72 * e;                                // adaptive: speed sets it
         return this.presence * engaged;
     }
 
@@ -1446,7 +1466,7 @@ export class MusicEngine {
         if (!this.running) return;
         const st = {
             type: p.type, x: p.x, y: p.y, pressure: p.pressure, tilt: p.tilt,
-            speedN: 0, holdStart: 0, lastPluck: -1,
+            speed: 0, speedN: 0, holdStart: 0, lastPluck: -1,
         };
         this.pointerState.set(p.id, st);
         if (this.voices.size < MAX_SUSTAINED_VOICES) this.voices.set(p.id, this.createVoice(st));
@@ -1465,6 +1485,7 @@ export class MusicEngine {
         st.y = p.y;
         st.pressure = p.pressure;
         st.tilt = p.tilt;
+        st.speed = p.speed;
         st.speedN = Math.min(1, p.speed / 2.2);
         if (p.holding) {
             if (!st.holdStart) st.holdStart = this.ctx.currentTime;
