@@ -2,10 +2,12 @@
 //
 // Everything is synthesized live with the Web Audio API: no samples, no audio files.
 //
-// The arrangement is driven by an "energy" level that follows how vigorously the canvas
-// is being played. Layers fade in as it rises:
-//   pad + generative bells → sub bass + shaker → hats + pulse bass → kick + clap
-//   → auto arpeggio → stabs, open hats, risers and crashes (intense)
+// The arrangement follows touch. Left alone, the music rests on a light bed: a soft, dark pad
+// and the occasional distant bell. The moment a finger lands the pulse comes in (shaker, sub,
+// soft bass), and the more vigorously the canvas is played the further it builds:
+//   bed → sub + shaker + pulse bass + hats → kick + clap → auto arpeggio
+//   → stabs, open hats, risers and crashes (intense)
+// Lift your fingers and it settles back to the bed within a few seconds.
 //
 // Touch input plays on top of that bed:
 //   - every finger / pen owns a sustained voice whose pitch follows x (scale-quantized),
@@ -152,8 +154,10 @@ export class MusicEngine {
         this.scale = SCALES.aeolian;
         this.pendingScale = null;
 
-        this.energy = 0;       // follows interaction, 0..1
-        this.level = 0;        // arrangement intensity, latched once per bar
+        this.presence = 0;     // is anyone touching? 0..1, quick to rise, relaxes after release
+        this.energy = 0;       // how vigorously they're playing, 0..1
+        this.level = 0;        // arrangement intensity, latched on every beat
+        this.bed = -1;         // last pad level sent to the audio graph
         this.degree = -1;      // current chord (scale degree)
         this.chordName = '';
 
@@ -381,7 +385,7 @@ export class MusicEngine {
         padLfoDepth.connect(this.padFilter.frequency);
         padLfo.start();
         this.padOut = ctx.createGain();
-        this.padOut.gain.value = 0.9;
+        this.padOut.gain.value = 0.3;      // the resting bed; opens up with touch (updateEnergy)
         this.padFilter.connect(this.padOut);
         this.padOut.connect(this.duck);
         const padVerb = ctx.createGain();
@@ -502,20 +506,42 @@ export class MusicEngine {
     }
 
     updateEnergy (dt) {
-        let drive = 0;
-        for (const st of this.pointerState.values()) {
-            const weight = st.type === 'pen' ? 0.5 + st.pressure : 1;
-            drive += (0.08 + 0.92 * st.speedN) * weight;
+        const touching = this.pointerState.size > 0;
+        // presence: in within ~0.2 s of a touch, out over ~2 s after the last finger lifts
+        const tau = touching ? 0.2 : 1.8;
+        this.presence += ((touching ? 1 : 0) - this.presence) * (1 - Math.exp(-dt / tau));
+
+        // energy: builds with speed and the number of fingers while touching, drains once left alone
+        if (touching) {
+            let drive = 0;
+            for (const st of this.pointerState.values()) {
+                const weight = st.type === 'pen' ? 0.5 + st.pressure : 1;
+                drive += (0.2 + 0.8 * st.speedN) * weight;
+            }
+            // settles where effort balances the drain: a resting finger keeps a gentle pulse,
+            // slow strokes bring the beat, fast strokes or several fingers go all the way
+            this.energy += dt * (0.22 * drive * (1.05 - this.energy) - 0.05);
+        } else {
+            this.energy *= Math.exp(-dt / 3);
         }
-        if (drive > 0) this.energy += dt * 0.16 * drive * (1.02 - this.energy);
-        this.energy -= dt * (drive > 0.05 ? 0.03 : 0.06);
         this.energy = clamp(this.energy, 0, 1);
+
+        // the pad sits quietly underneath when nobody is playing and opens up with touch
+        const bed = 0.3 + 0.6 * this.presence;
+        if (Math.abs(bed - this.bed) > 0.01) {
+            this.bed = bed;
+            this.padOut.gain.setTargetAtTime(bed, this.ctx.currentTime, 0.25);
+        }
     }
 
+    // Arrangement level: zero when nobody is touching (just the bed), an engaged floor as soon
+    // as a finger lands, then up with energy. Moods set how far a touch takes it.
     effectiveEnergy () {
-        if (this.mood === 'ambient') return this.energy * 0.42;
-        if (this.mood === 'intense') return 0.55 + this.energy * 0.45;
-        return this.energy;
+        let engaged;
+        if (this.mood === 'ambient') engaged = 0.18 + 0.2 * this.energy;       // stays below the drums
+        else if (this.mood === 'intense') engaged = 0.5 + 0.5 * this.energy;   // drums right away
+        else engaged = 0.38 + 0.62 * this.energy;                             // adaptive
+        return this.presence * engaged;
     }
 
     // ---------------------------------------------------------------- harmony
@@ -616,24 +642,32 @@ export class MusicEngine {
             this.pendingScale = null;
         }
         const previous = this.level;
-        this.level = this.effectiveEnergy();
+        this.updateLevel(time);
         const L = this.level;
 
         if (bar % 2 === 0 || this.degree < 0) this.nextChord(time, 2);
 
-        this.padFilter.frequency.setTargetAtTime(420 + 3400 * (0.12 + L) * (0.6 + 0.4 * L), time, 1.2);
-        this.bassDriven.gain.setTargetAtTime(0.55 * ramp(0.72, 0.95, L), time, 0.3);
-        this.bassClean.gain.setTargetAtTime(1 - 0.4 * ramp(0.72, 0.95, L), time, 0.3);
-
         const phrase = bar % 8;
         if (phrase === 7 && L > 0.62) this.riser(time, this.stepDur * 16);
-        const drop = previous < 0.5 && L >= 0.5;
-        if ((phrase === 0 && previous > 0.62) || drop) this.crash(time, 0.55 + 0.45 * L);
+        if (phrase === 0 && previous > 0.62) this.crash(time, 0.55 + 0.45 * L);
+    }
+
+    // Called on every beat, so a touch changes the music within a beat, not a bar.
+    updateLevel (time) {
+        const previous = this.level;
+        this.level = this.effectiveEnergy();
+        const L = this.level;
+        this.padFilter.frequency.setTargetAtTime(420 + 3400 * (0.12 + L) * (0.6 + 0.4 * L), time, 0.8);
+        this.bassDriven.gain.setTargetAtTime(0.55 * ramp(0.72, 0.95, L), time, 0.3);
+        this.bassClean.gain.setTargetAtTime(1 - 0.4 * ramp(0.72, 0.95, L), time, 0.3);
+        // the drums arriving is an event: mark it
+        if (previous < 0.5 && L >= 0.5) this.crash(time, 0.55 + 0.45 * L);
     }
 
     playStep (step, time) {
         const s16 = step % 16;
         if (s16 === 0) this.startBar(Math.floor(step / 16), time);
+        else if (s16 % 4 === 0) this.updateLevel(time);
         const L = this.level;
         const sd = this.stepDur;
         const rand = Math.random;
@@ -684,12 +718,14 @@ export class MusicEngine {
             this.pluck(note, time, 0.32 * arpGain, 0.5 + 0.35 * Math.sin(step * 0.37), 0.55, 'arp');
         }
 
-        // Generative bells: the ambient sparkle, busiest when things are calm
+        // Generative bells: a rare, distant sparkle when left alone, a little more when playing
         if (s16 % 2 === 0) {
-            const chance = 0.09 * (1 - 0.6 * L) + (this.pointerState.size ? 0 : 0.03);
+            const idle = this.presence < 0.1;
+            const chance = idle ? 0.015 : 0.05 * (1 - 0.5 * L);
             if (rand() < chance && this.hasRoom()) {
                 const note = this.randomChordTone(ROOT + 22, ROOT + 41);
-                this.bell(note, time + rand() * 0.02, 0.3 + 0.3 * rand(), rand() * 1.4 - 0.7, 0.75);
+                const velocity = idle ? 0.18 + 0.15 * rand() : 0.3 + 0.3 * rand();
+                this.bell(note, time + rand() * 0.02, velocity, rand() * 1.4 - 0.7, idle ? 0.9 : 0.75);
             }
         }
 
@@ -1320,6 +1356,7 @@ export class MusicEngine {
         this.subDrop(time);
         if (this.degree >= 0) this.stab(time, 1);
         this.energy = Math.min(1, this.energy + 0.25);
+        this.presence = Math.max(this.presence, 0.9);
     }
 
     // amount > 0 when fingers spread apart, < 0 when they pinch together (per frame).
